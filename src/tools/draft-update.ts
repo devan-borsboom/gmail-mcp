@@ -4,17 +4,18 @@ import type {Config} from './types.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
-import {appendMimeBody, attachmentSchema} from '../utils/mime.js';
+import {appendMimeBody, attachmentSchema, resolveAttachment} from '../utils/mime.js';
 
 const inputSchema = strictSchemaWithAliases({
 	draftId: z.string().describe('The ID of the draft to update'),
 	to: z.string().optional().describe('Recipient email address(es), comma-separated'),
 	subject: z.string().optional().describe('Email subject'),
-	body: z.string().optional().describe('Email body (plain text)'),
+	body: z.string().optional().describe('Email body (plain text or HTML)'),
+	isHtml: z.boolean().optional().describe('Treat body as HTML. If true, the draft renders as HTML.'),
 	cc: z.string().optional().describe('CC email address(es), comma-separated'),
 	bcc: z.string().optional().describe('BCC email address(es), comma-separated'),
 	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
-	attachments: z.array(attachmentSchema).optional().describe('Optional file attachments (base64-encoded)'),
+	attachments: z.array(attachmentSchema).optional().describe('Optional file attachments. Each may be {path} (preferred) or {filename, mimeType, content} where content is base64.'),
 }, {});
 
 const outputSchema = z.object({
@@ -34,7 +35,9 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 			inputSchema,
 			outputSchema,
 		},
-		async ({draftId, to, subject, body, cc, bcc, from, attachments}) => {
+		async ({draftId, to, subject, body, isHtml, cc, bcc, from, attachments}) => {
+			const resolvedAttachments = attachments?.map(resolveAttachment);
+
 			const lines = [
 				...(from ? [`From: ${from}`] : []),
 				...(to ? [`To: ${to}`] : []),
@@ -43,7 +46,7 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 				...(bcc ? [`Bcc: ${bcc}`] : []),
 			];
 
-			appendMimeBody(lines, body ?? '', attachments);
+			appendMimeBody(lines, body ?? '', resolvedAttachments, isHtml);
 
 			const email = lines.join('\r\n');
 			const encodedEmail = Buffer.from(email).toString('base64url');

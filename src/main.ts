@@ -251,8 +251,8 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			}
 		});
 
-		const httpServer = app.listen(port, () => {
-			console.error(`Gmail MCP server running on ${baseUrl}/mcp`);
+		const httpServer = app.listen(port, '127.0.0.1', () => {
+			console.error(`Gmail MCP server running on ${baseUrl}/mcp (bound to 127.0.0.1)`);
 		});
 
 		httpServer.on('error', (err: NodeJS.ErrnoException) => {

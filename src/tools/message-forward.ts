@@ -4,12 +4,16 @@ import type {Config} from './types.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
+import {
+	type ResolvedAttachment, attachmentSchema, resolveAttachment,
+} from '../utils/mime.js';
 
 const inputSchema = strictSchemaWithAliases({
 	id: z.string().describe('The ID of the message to forward'),
 	to: z.string().describe('Recipient email address(es), comma-separated for multiple'),
 	body: z.string().optional().describe('Optional message to add above the forwarded content'),
 	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
+	attachments: z.array(attachmentSchema).optional().describe('Optional NEW file attachments to add to the forward (in addition to the original message\'s attachments). Each may be {path} (preferred) or {filename, mimeType, content} where content is base64.'),
 }, {});
 
 const outputSchema = z.object({
@@ -327,7 +331,7 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 			inputSchema,
 			outputSchema,
 		},
-		async ({id, to, body: userMessage, from}) => {
+		async ({id, to, body: userMessage, from, attachments: userAttachments}) => {
 			// Fetch the original message
 			const original = await makeGmailApiCall('GET', `/users/me/messages/${id}?format=full`, config.token);
 			const parsed = messageSchema.parse(original);
@@ -416,6 +420,15 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 					: `${forwardHeader}\n${originalBodyContent}`;
 			}
 
+			// Adapt user-supplied attachments to forward's internal {filename, mimeType, data} shape
+			const userAttachmentParts = userAttachments?.map(resolveAttachment).map((a: ResolvedAttachment) => ({
+				filename: a.filename,
+				mimeType: a.mimeType,
+				data: a.content,
+			})) ?? [];
+
+			const allAttachments = [...attachments, ...userAttachmentParts];
+
 			// Create the message
 			const raw = createRawMessage({
 				to,
@@ -424,7 +437,7 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 				isHtml,
 				...(from && {from}),
 				inlineImages: inlineImages.length > 0 ? inlineImages : undefined,
-				attachments: attachments.length > 0 ? attachments : undefined,
+				attachments: allAttachments.length > 0 ? allAttachments : undefined,
 			});
 
 			// Send with threadId to keep in same thread

@@ -4,18 +4,21 @@ import type {Config} from './types.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
-import {type Attachment, appendMimeBody, attachmentSchema} from '../utils/mime.js';
+import {
+	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment,
+} from '../utils/mime.js';
 
 const inputSchema = strictSchemaWithAliases({
 	to: z.string().describe('Recipient email address(es), comma-separated for multiple'),
 	subject: z.string().describe('Email subject'),
-	body: z.string().describe('Email body (plain text)'),
+	body: z.string().describe('Email body (plain text or HTML)'),
+	isHtml: z.boolean().optional().describe('Treat body as HTML. If true, the draft renders as HTML.'),
 	cc: z.string().optional().describe('CC recipients, comma-separated'),
 	bcc: z.string().optional().describe('BCC recipients, comma-separated'),
 	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
 	threadId: z.string().optional().describe('Thread ID if this is a reply draft'),
 	inReplyTo: z.string().optional().describe('Message-ID header of the message being replied to'),
-	attachments: z.array(attachmentSchema).optional().describe('Optional file attachments (base64-encoded)'),
+	attachments: z.array(attachmentSchema).optional().describe('Optional file attachments. Each may be {path} (preferred) or {filename, mimeType, content} where content is base64.'),
 }, {});
 
 const outputSchema = z.object({
@@ -34,11 +37,12 @@ function createRawMessage(options: {
 	to: string;
 	subject: string;
 	body: string;
+	isHtml?: boolean;
 	cc?: string;
 	bcc?: string;
 	from?: string;
 	inReplyTo?: string;
-	attachments?: Attachment[];
+	attachments?: ResolvedAttachment[];
 }): string {
 	const lines: string[] = [];
 
@@ -61,7 +65,7 @@ function createRawMessage(options: {
 		lines.push(`References: ${options.inReplyTo}`);
 	}
 
-	appendMimeBody(lines, options.body, options.attachments);
+	appendMimeBody(lines, options.body, options.attachments, options.isHtml);
 
 	const message = lines.join('\r\n');
 
@@ -81,16 +85,19 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 			inputSchema,
 			outputSchema,
 		},
-		async ({to, subject, body, cc, bcc, from, threadId, inReplyTo, attachments}) => {
+		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, attachments}) => {
+			const resolvedAttachments = attachments?.map(resolveAttachment);
+
 			const raw = createRawMessage({
 				to,
 				subject,
 				body,
+				...(isHtml && {isHtml}),
 				...(cc && {cc}),
 				...(bcc && {bcc}),
 				...(from && {from}),
 				...(inReplyTo && {inReplyTo}),
-				...(attachments && {attachments}),
+				...(resolvedAttachments && {attachments: resolvedAttachments}),
 			});
 
 			const requestBody: {message: {raw: string; threadId?: string}} = {

@@ -1,0 +1,128 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import {
+	describe, it, expect, afterEach,
+} from 'vitest';
+import {appendMimeBody, resolveAttachment} from './mime.js';
+
+const TMP_NAME = 'gmail-mcp-test-attach.txt';
+const TMP_PATH = path.join(os.homedir(), 'Downloads', TMP_NAME);
+
+const PDF_NAME = 'gmail-mcp-test-data.bin';
+const PDF_PATH = path.join(os.homedir(), 'Downloads', PDF_NAME);
+
+afterEach(() => {
+	for (const p of [TMP_PATH, PDF_PATH]) {
+		if (fs.existsSync(p)) {
+			fs.unlinkSync(p);
+		}
+	}
+});
+
+describe('resolveAttachment', () => {
+	it('reads a file from ~/Downloads and infers MIME type by extension', () => {
+		fs.writeFileSync(TMP_PATH, 'hello');
+		const result = resolveAttachment({path: TMP_PATH});
+		expect(result.filename).toBe(TMP_NAME);
+		expect(result.mimeType).toBe('text/plain');
+		expect(Buffer.from(result.content, 'base64').toString()).toBe('hello');
+	});
+
+	it('rejects an absolute path outside the allowlist', () => {
+		expect(() => resolveAttachment({path: '/etc/passwd'})).toThrow(/not allowed/);
+	});
+
+	it('rejects a ~-rooted path outside the allowlist', () => {
+		expect(() => resolveAttachment({path: '~/.ssh/id_rsa'})).toThrow(/not allowed/);
+	});
+
+	it('honors filename and mimeType overrides', () => {
+		fs.writeFileSync(PDF_PATH, 'x');
+		const result = resolveAttachment({
+			path: PDF_PATH,
+			filename: 'report.pdf',
+			mimeType: 'application/pdf',
+		});
+		expect(result.filename).toBe('report.pdf');
+		expect(result.mimeType).toBe('application/pdf');
+	});
+
+	it('passes base64 content through unchanged (no extra wrapping)', () => {
+		const result = resolveAttachment({
+			filename: 'x.txt',
+			mimeType: 'text/plain',
+			content: 'aGVsbG8=',
+		});
+		expect(result.content).toBe('aGVsbG8=');
+	});
+
+	it('strips embedded newlines from pre-wrapped base64 input', () => {
+		const wrapped = 'aGVsbG8\r\n=';
+		const result = resolveAttachment({
+			filename: 'x.txt',
+			mimeType: 'text/plain',
+			content: wrapped,
+		});
+		expect(result.content).toBe('aGVsbG8=');
+	});
+
+	it('falls back to application/octet-stream for unknown extensions', () => {
+		const oddPath = path.join(os.homedir(), 'Downloads', 'whatever.zzzunknown');
+		fs.writeFileSync(oddPath, 'x');
+		try {
+			const result = resolveAttachment({path: oddPath});
+			expect(result.mimeType).toBe('application/octet-stream');
+		} finally {
+			fs.unlinkSync(oddPath);
+		}
+	});
+});
+
+describe('appendMimeBody', () => {
+	it('produces a single-part text body when no attachments', () => {
+		const lines: string[] = [];
+		appendMimeBody(lines, 'just text');
+		const joined = lines.join('\r\n');
+		expect(joined).toContain('Content-Type: text/plain; charset=utf-8');
+		expect(joined).toContain('just text');
+		expect(joined).not.toContain('multipart');
+	});
+
+	it('honors isHtml=true on single-part bodies', () => {
+		const lines: string[] = [];
+		appendMimeBody(lines, '<p>hi</p>', undefined, true);
+		expect(lines.join('\r\n')).toContain('Content-Type: text/html; charset=utf-8');
+	});
+
+	it('produces multipart/mixed when attachments are present', () => {
+		const lines: string[] = [];
+		appendMimeBody(lines, 'body', [{filename: 'a.pdf', mimeType: 'application/pdf', content: 'AAAA'}]);
+		const joined = lines.join('\r\n');
+		expect(joined).toContain('MIME-Version: 1.0');
+		expect(joined).toContain('multipart/mixed; boundary="');
+		expect(joined).toContain('Content-Disposition: attachment; filename="a.pdf"');
+		expect(joined).toContain('Content-Transfer-Encoding: base64');
+	});
+
+	it('uses text/html for the body part when isHtml=true with attachments', () => {
+		const lines: string[] = [];
+		appendMimeBody(lines, '<p>hi</p>', [{filename: 'a.pdf', mimeType: 'application/pdf', content: 'AAAA'}], true);
+		const joined = lines.join('\r\n');
+		expect(joined).toContain('multipart/mixed');
+		expect(joined).toMatch(/Content-Type: text\/html; charset=utf-8/);
+	});
+
+	it('wraps base64 content at 76 characters per RFC 2045', () => {
+		const longB64 = 'A'.repeat(200);
+		const lines: string[] = [];
+		appendMimeBody(lines, 'body', [{filename: 'a.bin', mimeType: 'application/octet-stream', content: longB64}]);
+		const joined = lines.join('\r\n');
+		const segment = joined.split('Content-Disposition: attachment; filename="a.bin"\r\n\r\n')[1] ?? '';
+		const b64Lines = segment.split('\r\n').filter((l) => l.match(/^A+$/));
+		expect(b64Lines.length).toBeGreaterThan(1);
+		for (const l of b64Lines) {
+			expect(l.length).toBeLessThanOrEqual(76);
+		}
+	});
+});
