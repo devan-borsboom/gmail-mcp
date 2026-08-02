@@ -5,18 +5,18 @@ import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
-	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment,
+	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
 import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
 
 const inputSchema = strictSchemaWithAliases({
-	to: z.string().describe('Recipient email address(es), comma-separated for multiple'),
-	subject: z.string().describe('Email subject'),
+	to: safeHeaderString.describe('Recipient email address(es), comma-separated for multiple'),
+	subject: safeHeaderString.describe('Email subject'),
 	body: z.string().describe('Email body (plain text or HTML)'),
 	isHtml: z.boolean().optional().describe('Send as HTML. If true, body is treated as HTML.'),
-	cc: z.string().optional().describe('CC recipients, comma-separated'),
-	bcc: z.string().optional().describe('BCC recipients, comma-separated'),
-	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
+	cc: safeHeaderString.optional().describe('CC recipients, comma-separated'),
+	bcc: safeHeaderString.optional().describe('BCC recipients, comma-separated'),
+	from: safeHeaderString.optional().describe('Sender email address (for send-as aliases)'),
 	threadId: z.string().optional().describe('Thread ID to reply to'),
 	inReplyTo: z.string().optional().describe('Message-ID header of the message being replied to, e.g. <abc@mail.gmail.com>'),
 	references: z.string().optional().describe('The References header of the message being replied to. Pass it verbatim and the parent Message-ID is appended automatically, so the recipient sees a correctly threaded reply. Omitting this on a multi-message thread breaks threading for the recipient.'),

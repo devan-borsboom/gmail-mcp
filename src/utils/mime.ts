@@ -3,7 +3,15 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {z} from 'zod';
 
-const safeHeaderString = z.string().regex(/^[^\r\n]*$/, 'Must not contain newline characters');
+/**
+ * A string safe to interpolate into a single RFC 5322 header line.
+ *
+ * Header values are joined with CRLF, so an embedded newline lets a caller
+ * append arbitrary headers (a Bcc, most obviously) to a message the user
+ * believes has one recipient. Every caller-supplied value that lands in a
+ * header — addresses, subject, attachment filenames — must go through this.
+ */
+export const safeHeaderString = z.string().regex(/^[^\r\n]*$/, 'Must not contain newline characters');
 
 // Realpath the roots too, so the comparison below is symlink-to-symlink
 // consistent (e.g. if ~/Documents itself is a link into a synced volume).

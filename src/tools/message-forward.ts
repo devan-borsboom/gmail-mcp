@@ -5,14 +5,14 @@ import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
-	type ResolvedAttachment, attachmentSchema, resolveAttachment,
+	type ResolvedAttachment, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
 
 const inputSchema = strictSchemaWithAliases({
 	id: z.string().describe('The ID of the message to forward'),
-	to: z.string().describe('Recipient email address(es), comma-separated for multiple'),
+	to: safeHeaderString.describe('Recipient email address(es), comma-separated for multiple'),
 	body: z.string().optional().describe('Optional message to add above the forwarded content'),
-	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
+	from: safeHeaderString.optional().describe('Sender email address (for send-as aliases)'),
 	attachments: z.array(attachmentSchema).optional().describe('Optional NEW file attachments to add to the forward (in addition to the original message\'s attachments). Each may be {path} (preferred) or {filename, mimeType, content} where content is base64.'),
 }, {});
 
