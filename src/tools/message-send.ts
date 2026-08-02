@@ -103,11 +103,15 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 			// A caller that supplies threadId but omits references would otherwise
 			// emit a single-id chain and break threading for the recipient. Recover
 			// the chain from the thread rather than trusting the caller to pass it.
-			const recovered = threadId && !references
-				? await fetchThreadHeaders(threadId, config.token, inReplyTo)
+			// Blank is treated as absent: `?? ` alone would keep an empty string and
+			// discard the recovered value the lookup just paid for.
+			const givenInReplyTo = inReplyTo?.trim() ? inReplyTo : undefined;
+			const givenReferences = references?.trim() ? references : undefined;
+			const recovered = threadId && !givenReferences
+				? await fetchThreadHeaders(threadId, config.token, givenInReplyTo)
 				: {};
-			const effectiveInReplyTo = inReplyTo ?? recovered.inReplyTo;
-			const effectiveReferences = references ?? recovered.references;
+			const effectiveInReplyTo = givenInReplyTo ?? recovered.inReplyTo;
+			const effectiveReferences = givenReferences ?? recovered.references;
 
 			const {raw, warning} = createRawMessage({
 				to,
@@ -128,9 +132,10 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 			}
 
 			const result = await makeGmailApiCall('POST', '/users/me/messages/send', config.token, requestBody);
+			const threadingWarning = [recovered.warning, warning].filter(Boolean).join(' ');
 			return jsonResult(outputSchema.parse({
 				...(result as Record<string, unknown>),
-				...(warning && {threadingWarning: warning}),
+				...(threadingWarning && {threadingWarning}),
 			}));
 		},
 	);

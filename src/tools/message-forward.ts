@@ -5,7 +5,7 @@ import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
-	type ResolvedAttachment, attachmentSchema, resolveAttachment, safeHeaderString,
+	type ResolvedAttachment, attachmentSchema, resolveAttachment, safeHeaderString, stripNewlines,
 } from '../utils/mime.js';
 import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
 
@@ -246,7 +246,12 @@ function createRawMessage(options: EmailOptions): string {
 	}
 
 	lines.push(`To: ${options.to}`);
-	lines.push(`Subject: ${options.subject}`);
+	// The subject is derived from the message being forwarded, so unlike every
+	// other header value here it is written by a stranger and never passes the
+	// input schema's newline guard. A newline in it appends a header of the
+	// attacker's choosing — a Bcc, for instance — to a message the user believes
+	// has one recipient.
+	lines.push(`Subject: ${stripNewlines(options.subject)}`);
 
 	// A forward is a reply-to-nothing as far as the new recipient's client is
 	// concerned unless it carries the forwarded message's identity. Without

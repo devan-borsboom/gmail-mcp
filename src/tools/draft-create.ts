@@ -101,13 +101,15 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, references, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
-			// Same recovery as message_send: never let an omitted `references`
-			// silently collapse the chain. See utils/thread-context.ts.
-			const recovered = threadId && !references
-				? await fetchThreadHeaders(threadId, config.token, inReplyTo)
+			// Same recovery as message_send, including the blank-is-absent rule.
+			// See utils/thread-context.ts.
+			const givenInReplyTo = inReplyTo?.trim() ? inReplyTo : undefined;
+			const givenReferences = references?.trim() ? references : undefined;
+			const recovered = threadId && !givenReferences
+				? await fetchThreadHeaders(threadId, config.token, givenInReplyTo)
 				: {};
-			const effectiveInReplyTo = inReplyTo ?? recovered.inReplyTo;
-			const effectiveReferences = references ?? recovered.references;
+			const effectiveInReplyTo = givenInReplyTo ?? recovered.inReplyTo;
+			const effectiveReferences = givenReferences ?? recovered.references;
 
 			const {raw, warning} = createRawMessage({
 				to,
@@ -130,9 +132,10 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 			}
 
 			const result = await makeGmailApiCall('POST', '/users/me/drafts', config.token, requestBody);
+			const threadingWarning = [recovered.warning, warning].filter(Boolean).join(' ');
 			return jsonResult(outputSchema.parse({
 				...(result as Record<string, unknown>),
-				...(warning && {threadingWarning: warning}),
+				...(threadingWarning && {threadingWarning}),
 			}));
 		},
 	);

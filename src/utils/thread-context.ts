@@ -15,6 +15,7 @@ import {makeGmailApiCall} from './gmail-api.js';
  */
 
 type ThreadMessage = {
+	labelIds?: string[];
 	payload?: {
 		headers?: {name?: string; value?: string}[];
 	};
@@ -28,7 +29,10 @@ function header(msg: ThreadMessage, name: string): string | undefined {
 export type ThreadHeaders = {
 	inReplyTo?: string;
 	references?: string;
+	warning?: string;
 };
+
+const RECOVERY_FAILED = 'Could not rebuild the reply chain from the thread, so this message may open a new thread for the recipient. Retry with inReplyTo and references taken from the parent message.';
 
 export async function fetchThreadHeaders(
 	threadId: string,
@@ -43,9 +47,12 @@ export async function fetchThreadHeaders(
 			token,
 		) as {messages?: ThreadMessage[]};
 
-		const messages = thread.messages ?? [];
+		// A draft sits in the thread and carries a Message-ID of its own, but no
+		// recipient has ever seen it, so inheriting from one points the reply at
+		// a message that does not exist on the other end.
+		const messages = (thread.messages ?? []).filter((m) => !m.labelIds?.includes('DRAFT'));
 		if (messages.length === 0) {
-			return {};
+			return {warning: RECOVERY_FAILED};
 		}
 
 		// Prefer the message the caller says it is replying to, so the chain we
@@ -61,14 +68,21 @@ export async function fetchThreadHeaders(
 		const messageId = header(parent, 'Message-Id');
 		const references = header(parent, 'References');
 
+		if (!messageId) {
+			return {warning: RECOVERY_FAILED};
+		}
+
 		return {
-			...(messageId && {inReplyTo: messageId}),
+			inReplyTo: messageId,
 			// The outgoing References is the parent's References plus the
 			// parent's own Message-ID. buildThreadHeaders appends the latter,
 			// so hand it only the inherited part.
 			...(references && {references}),
 		};
 	} catch {
-		return {};
+		// Best-effort: a lookup failure must never fail the send. It must not be
+		// silent either — an unreported failure is the original defect, reached
+		// by a different road.
+		return {warning: RECOVERY_FAILED};
 	}
 }

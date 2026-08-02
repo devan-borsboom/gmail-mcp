@@ -13,6 +13,16 @@ import {z} from 'zod';
  */
 export const safeHeaderString = z.string().regex(/^[^\r\n]*$/, 'Must not contain newline characters');
 
+/**
+ * Flatten a header value that did not come from the caller, and so was never
+ * checked by `safeHeaderString` — a subject copied off an inbound message, for
+ * example. Rejecting is not an option there: the value is already in the user's
+ * mailbox and the operation should still succeed.
+ */
+export function stripNewlines(value: string): string {
+	return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
 // Realpath the roots too, so the comparison below is symlink-to-symlink
 // consistent (e.g. if ~/Documents itself is a link into a synced volume).
 // `code` and `claude-memory` were removed 2026-08-02. The caller is a language
