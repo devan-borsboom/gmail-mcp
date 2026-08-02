@@ -12,10 +12,16 @@ const TMP_PATH = path.join(os.homedir(), 'Downloads', TMP_NAME);
 const PDF_NAME = 'gmail-mcp-test-data.bin';
 const PDF_PATH = path.join(os.homedir(), 'Downloads', PDF_NAME);
 
+const LINK_PATH = path.join(os.homedir(), 'Downloads', 'gmail-mcp-test-link.txt');
+
 afterEach(() => {
-	for (const p of [TMP_PATH, PDF_PATH]) {
-		if (fs.existsSync(p)) {
+	// lstat, not existsSync: a symlink to a missing target reports as absent.
+	for (const p of [TMP_PATH, PDF_PATH, LINK_PATH]) {
+		try {
+			fs.lstatSync(p);
 			fs.unlinkSync(p);
+		} catch {
+			// not there, nothing to clean up
 		}
 	}
 });
@@ -35,6 +41,30 @@ describe('resolveAttachment', () => {
 
 	it('rejects a ~-rooted path outside the allowlist', () => {
 		expect(() => resolveAttachment({path: '~/.ssh/id_rsa'})).toThrow(/not allowed/);
+	});
+
+	/**
+	 * path.resolve() is purely lexical and does not follow symlinks, so a link
+	 * dropped inside an allowed root used to pass this gate and have its target
+	 * read and emailed. realpathSync is what actually confines us. Without this
+	 * test a refactor back to path.resolve() would be silently green.
+	 */
+	it('rejects a symlink inside an allowed root that points outside it', () => {
+		fs.symlinkSync('/etc/hosts', LINK_PATH);
+		expect(() => resolveAttachment({path: LINK_PATH})).toThrow(/not allowed/);
+	});
+
+	it('still follows a symlink whose target is inside an allowed root', () => {
+		fs.writeFileSync(TMP_PATH, 'hello');
+		fs.symlinkSync(TMP_PATH, LINK_PATH);
+		expect(resolveAttachment({path: LINK_PATH}).content).toBe(Buffer.from('hello').toString('base64'));
+	});
+
+	// Removed from the allowlist 2026-08-02: the caller reads untrusted inbound
+	// email, and neither source nor private notes are legitimately emailed.
+	it('rejects the roots removed from the allowlist', () => {
+		expect(() => resolveAttachment({path: '~/claude-memory/user_profile.md'})).toThrow(/not allowed/);
+		expect(() => resolveAttachment({path: '~/code/gmail-mcp/package.json'})).toThrow(/not allowed/);
 	});
 
 	it('honors filename and mimeType overrides', () => {

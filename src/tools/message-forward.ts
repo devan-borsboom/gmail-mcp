@@ -7,6 +7,7 @@ import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
 	type ResolvedAttachment, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
+import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
 
 const inputSchema = strictSchemaWithAliases({
 	id: z.string().describe('The ID of the message to forward'),
@@ -225,6 +226,8 @@ type EmailOptions = {
 	body: string;
 	isHtml?: boolean;
 	from?: string;
+	inReplyTo?: string;
+	references?: string;
 	inlineImages?: {mimeType: string; contentId: string; data: string}[];
 	attachments?: {filename: string; mimeType: string; data: string}[];
 };
@@ -244,6 +247,21 @@ function createRawMessage(options: EmailOptions): string {
 
 	lines.push(`To: ${options.to}`);
 	lines.push(`Subject: ${options.subject}`);
+
+	// A forward is a reply-to-nothing as far as the new recipient's client is
+	// concerned unless it carries the forwarded message's identity. Without
+	// these, every forward opens a fresh thread — the same recipient-side
+	// defect that message_send had. Derived from the forwarded message rather
+	// than taken from the caller, so there is nothing to forget to pass.
+	const thread = buildThreadHeaders(options.inReplyTo, options.references);
+	if (thread.inReplyTo) {
+		lines.push(`In-Reply-To: ${thread.inReplyTo}`);
+	}
+
+	if (thread.references) {
+		lines.push(foldHeader('References', thread.references));
+	}
+
 	lines.push('MIME-Version: 1.0');
 
 	if (hasAttachments || hasInlineImages) {
@@ -343,6 +361,8 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 			const originalDate = getHeader(headers, 'Date') ?? '';
 			const originalSubject = getHeader(headers, 'Subject') ?? '';
 			const originalCc = getHeader(headers, 'Cc');
+			const originalMessageId = getHeader(headers, 'Message-Id') ?? getHeader(headers, 'Message-ID');
+			const originalReferences = getHeader(headers, 'References');
 
 			// Extract body
 			const {content: originalBodyContent, isHtml} = extractBody(parsed.payload);
@@ -436,6 +456,8 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 				body: fullBody,
 				isHtml,
 				...(from && {from}),
+				...(originalMessageId && {inReplyTo: originalMessageId}),
+				...(originalReferences && {references: originalReferences}),
 				inlineImages: inlineImages.length > 0 ? inlineImages : undefined,
 				attachments: allAttachments.length > 0 ? allAttachments : undefined,
 			});

@@ -43,9 +43,25 @@ export function decodeEntities(value: string): string {
 	return current;
 }
 
-/** A msg-id is `<local@domain>` with no whitespace or nested angle brackets. */
-const MSGID_SHAPE = /^<[^<>\s]+@[^<>\s]+>$/;
-const MSGID_GLOBAL = /<[^<>\s]+@[^<>\s]+>/g;
+/**
+ * A msg-id is `<local@domain>` built from printable US-ASCII excluding the
+ * angle brackets themselves. The explicit ASCII range matters: `[^<>\s]`
+ * also admits non-ASCII, and header values are emitted as raw bytes by
+ * `Buffer.from(message)`, so an accented or emoji id would put illegal 8-bit
+ * octets in a header rather than being rejected.
+ */
+const MSGID_SHAPE = /^<[\x21-\x3B\x3D\x3F-\x7E]+@[\x21-\x3B\x3D\x3F-\x7E]+>$/;
+const MSGID_GLOBAL = /<[\x21-\x3B\x3D\x3F-\x7E]+@[\x21-\x3B\x3D\x3F-\x7E]+>/g;
+
+/**
+ * Upper bound on a single msg-id, angle brackets included.
+ *
+ * RFC 5322 caps a line at 998 characters and a msg-id contains no whitespace,
+ * so an oversized id cannot be folded legally — it would emit an over-long
+ * line. Real ids are well under 100 characters; 512 is generous while keeping
+ * a folded `References` continuation line inside the limit.
+ */
+const MAX_MSGID_LENGTH = 512;
 
 /**
  * Normalise a single Message-ID: unescape, trim, ensure angle brackets, and
@@ -64,6 +80,10 @@ export function normalizeMessageId(raw: string): string | undefined {
 
 	if (!value.endsWith('>')) {
 		value = `${value}>`;
+	}
+
+	if (value.length > MAX_MSGID_LENGTH) {
+		return undefined;
 	}
 
 	return MSGID_SHAPE.test(value) ? value : undefined;
@@ -104,6 +124,7 @@ export function normalizeReferences(raw?: string): string[] {
 export function buildThreadHeaders(inReplyTo?: string, references?: string): {
 	inReplyTo?: string;
 	references?: string;
+	warning?: string;
 } {
 	const parent = inReplyTo ? normalizeMessageId(inReplyTo) : undefined;
 	const chain = normalizeReferences(references);
@@ -111,9 +132,25 @@ export function buildThreadHeaders(inReplyTo?: string, references?: string): {
 		chain.push(parent);
 	}
 
+	// Dropping a malformed header is safer than emitting a broken one, but a
+	// silent drop leaves the caller believing the reply threaded. Report it so
+	// the caller can retry with a usable value instead of shipping a reply that
+	// starts a new thread on the recipient's side.
+	const dropped: string[] = [];
+	if (inReplyTo && !parent) {
+		dropped.push('inReplyTo');
+	}
+
+	if (references && chain.length === 0) {
+		dropped.push('references');
+	}
+
 	return {
 		...(parent && {inReplyTo: parent}),
 		...(chain.length > 0 && {references: chain.join(' ')}),
+		...(dropped.length > 0 && {
+			warning: `Threading header(s) omitted because the supplied value was not a usable Message-ID: ${dropped.join(', ')}. The recipient may see this as a new thread.`,
+		}),
 	};
 }
 
@@ -128,7 +165,14 @@ export function foldHeader(name: string, value: string): string {
 	const lines: string[] = [];
 	let current = `${name}:`;
 	for (const token of tokens) {
-		if (current !== `${name}:` && current.length + 1 + token.length > 76) {
+		// Folding may only happen at whitespace, so a token longer than the
+		// limit cannot be split legally. Give it its own continuation line —
+		// the best that is possible here. MAX_MSGID_LENGTH keeps ids short
+		// enough that this stays inside RFC 5322's 998-character hard limit.
+		const startsNewLine = current !== `${name}:`
+			&& current.length + 1 + token.length > 76;
+
+		if (startsNewLine) {
 			lines.push(current);
 			current = ` ${token}`;
 		} else {

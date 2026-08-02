@@ -8,6 +8,7 @@ import {
 	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
 import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
+import {fetchThreadHeaders} from '../utils/thread-context.js';
 
 const inputSchema = strictSchemaWithAliases({
 	to: safeHeaderString.describe('Recipient email address(es), comma-separated for multiple'),
@@ -27,6 +28,7 @@ const outputSchema = z.object({
 	id: z.string(),
 	threadId: z.string(),
 	labelIds: z.array(z.string()).optional(),
+	threadingWarning: z.string().optional(),
 });
 
 /**
@@ -43,7 +45,7 @@ function createRawMessage(options: {
 	inReplyTo?: string;
 	references?: string;
 	attachments?: ResolvedAttachment[];
-}): string {
+}): {raw: string; warning?: string} {
 	const lines: string[] = [];
 
 	if (options.from) {
@@ -77,11 +79,13 @@ function createRawMessage(options: {
 
 	const message = lines.join('\r\n');
 
-	return Buffer.from(message)
+	const raw = Buffer.from(message)
 		.toString('base64')
 		.replace(/\+/g, '-')
 		.replace(/\//g, '_')
 		.replace(/=+$/, '');
+
+	return {raw, ...(thread.warning && {warning: thread.warning})};
 }
 
 export function registerMessageSend(server: McpServer, config: Config): void {
@@ -96,7 +100,16 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, references, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
-			const raw = createRawMessage({
+			// A caller that supplies threadId but omits references would otherwise
+			// emit a single-id chain and break threading for the recipient. Recover
+			// the chain from the thread rather than trusting the caller to pass it.
+			const recovered = threadId && !references
+				? await fetchThreadHeaders(threadId, config.token, inReplyTo)
+				: {};
+			const effectiveInReplyTo = inReplyTo ?? recovered.inReplyTo;
+			const effectiveReferences = references ?? recovered.references;
+
+			const {raw, warning} = createRawMessage({
 				to,
 				subject,
 				body,
@@ -104,8 +117,8 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 				...(cc && {cc}),
 				...(bcc && {bcc}),
 				...(from && {from}),
-				...(inReplyTo && {inReplyTo}),
-				...(references && {references}),
+				...(effectiveInReplyTo && {inReplyTo: effectiveInReplyTo}),
+				...(effectiveReferences && {references: effectiveReferences}),
 				...(resolvedAttachments && {attachments: resolvedAttachments}),
 			});
 
@@ -115,7 +128,10 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 			}
 
 			const result = await makeGmailApiCall('POST', '/users/me/messages/send', config.token, requestBody);
-			return jsonResult(outputSchema.parse(result));
+			return jsonResult(outputSchema.parse({
+				...(result as Record<string, unknown>),
+				...(warning && {threadingWarning: warning}),
+			}));
 		},
 	);
 }

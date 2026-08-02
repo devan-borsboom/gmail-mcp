@@ -15,7 +15,11 @@ export const safeHeaderString = z.string().regex(/^[^\r\n]*$/, 'Must not contain
 
 // Realpath the roots too, so the comparison below is symlink-to-symlink
 // consistent (e.g. if ~/Documents itself is a link into a synced volume).
-const ALLOWED_ROOTS = ['Downloads', 'Documents', 'Desktop', 'yeticonnect-team-data', 'code', 'claude-memory']
+// `code` and `claude-memory` were removed 2026-08-02. The caller is a language
+// model that reads untrusted inbound email, so anything on this list is
+// reachable by a sufficiently persuasive message. Source and private notes are
+// never legitimately emailed from here; deliverables live in Downloads.
+const ALLOWED_ROOTS = ['Downloads', 'Documents', 'Desktop', 'yeticonnect-team-data']
 	.map((d) => path.join(os.homedir(), d))
 	.map((d) => {
 		try {
@@ -49,7 +53,7 @@ const MIME_MAP: Record<string, string> = {
 
 export const attachmentSchema = z.union([
 	z.object({
-		path: z.string().describe('Absolute local file path. Must resolve under ~/Downloads, ~/Documents, ~/Desktop, ~/yeticonnect-team-data, ~/code, or ~/claude-memory.'),
+		path: z.string().describe('Absolute local file path. Must resolve under ~/Downloads, ~/Documents, ~/Desktop, or ~/yeticonnect-team-data.'),
 		filename: safeHeaderString.optional().describe('Override filename in the email (defaults to basename of path)'),
 		mimeType: safeHeaderString.optional().describe('Override MIME type (defaults to extension-based guess)'),
 	}),

@@ -42,19 +42,24 @@ function setupSignalHandlers(cleanup: () => Promise<void>): void {
  * Origin is not a loopback name (MCP spec, "Security Warning" on the
  * Streamable HTTP transport).
  *
- * Set GMAIL_MCP_EXTRA_HOSTS (comma-separated) only if a client genuinely needs
- * a non-loopback callback host.
+ * Two SEPARATE escape hatches, deliberately not one:
+ *   GMAIL_MCP_EXTRA_HOSTS          - extra names this server will answer for
+ *   GMAIL_MCP_EXTRA_REDIRECT_HOSTS - extra OAuth redirect_uri targets
+ * A single variable feeding both meant that widening the first to make a
+ * client reachable silently widened the second, turning an attacker-supplied
+ * host into a valid place to deliver an authorization code.
  */
-const LOOPBACK_HOSTS = new Set([
-	'localhost',
-	'127.0.0.1',
-	'::1',
-	'[::1]',
-	...(process.env.GMAIL_MCP_EXTRA_HOSTS ?? '')
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1', '[::1]'];
+
+function hostsFromEnv(name: string): string[] {
+	return (process.env[name] ?? '')
 		.split(',')
 		.map((h) => h.trim().toLowerCase())
-		.filter(Boolean),
-]);
+		.filter(Boolean);
+}
+
+const HOST_ALLOWLIST = new Set([...LOOPBACK_HOSTS, ...hostsFromEnv('GMAIL_MCP_EXTRA_HOSTS')]);
+const REDIRECT_ALLOWLIST = new Set([...LOOPBACK_HOSTS, ...hostsFromEnv('GMAIL_MCP_EXTRA_REDIRECT_HOSTS')]);
 
 function isLoopbackHostHeader(hostHeader?: string): boolean {
 	if (!hostHeader) {
@@ -63,17 +68,17 @@ function isLoopbackHostHeader(hostHeader?: string): boolean {
 
 	// Strip the port. Bracketed IPv6 literals keep their brackets.
 	const host = hostHeader.replace(/:\d+$/, '').toLowerCase();
-	return LOOPBACK_HOSTS.has(host);
+	return HOST_ALLOWLIST.has(host);
 }
 
-function isLoopbackUrl(value: string): boolean {
+function isLoopbackUrl(value: string, allowlist: Set<string> = REDIRECT_ALLOWLIST): boolean {
 	try {
 		const url = new URL(value);
 		if (url.protocol !== 'http:' && url.protocol !== 'https:') {
 			return false;
 		}
 
-		return LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+		return allowlist.has(url.hostname.toLowerCase());
 	} catch {
 		return false;
 	}
@@ -127,8 +132,12 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 				return;
 			}
 
+			// `null` is NOT exempt. Programmatic MCP clients send no Origin at
+			// all, which is already allowed; a literal `null` origin comes from
+			// a browsing context (sandboxed iframe, data: URL) and has no
+			// legitimate reason to reach this server.
 			const {origin} = req.headers;
-			if (origin && origin !== 'null' && !isLoopbackUrl(origin)) {
+			if (origin && !isLoopbackUrl(origin, HOST_ALLOWLIST)) {
 				res.status(403).json({
 					error: 'forbidden_origin',
 					error_description: 'Cross-origin requests are not accepted.',

@@ -8,6 +8,7 @@ import {
 	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
 import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
+import {fetchThreadHeaders} from '../utils/thread-context.js';
 
 const inputSchema = strictSchemaWithAliases({
 	to: safeHeaderString.describe('Recipient email address(es), comma-separated for multiple'),
@@ -30,6 +31,7 @@ const outputSchema = z.object({
 		threadId: z.string(),
 		labelIds: z.array(z.string()).optional(),
 	}),
+	threadingWarning: z.string().optional(),
 });
 
 /**
@@ -46,7 +48,7 @@ function createRawMessage(options: {
 	inReplyTo?: string;
 	references?: string;
 	attachments?: ResolvedAttachment[];
-}): string {
+}): {raw: string; warning?: string} {
 	const lines: string[] = [];
 
 	if (options.from) {
@@ -78,11 +80,13 @@ function createRawMessage(options: {
 
 	const message = lines.join('\r\n');
 
-	return Buffer.from(message)
+	const raw = Buffer.from(message)
 		.toString('base64')
 		.replace(/\+/g, '-')
 		.replace(/\//g, '_')
 		.replace(/=+$/, '');
+
+	return {raw, ...(thread.warning && {warning: thread.warning})};
 }
 
 export function registerDraftCreate(server: McpServer, config: Config): void {
@@ -97,7 +101,15 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, references, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
-			const raw = createRawMessage({
+			// Same recovery as message_send: never let an omitted `references`
+			// silently collapse the chain. See utils/thread-context.ts.
+			const recovered = threadId && !references
+				? await fetchThreadHeaders(threadId, config.token, inReplyTo)
+				: {};
+			const effectiveInReplyTo = inReplyTo ?? recovered.inReplyTo;
+			const effectiveReferences = references ?? recovered.references;
+
+			const {raw, warning} = createRawMessage({
 				to,
 				subject,
 				body,
@@ -105,8 +117,8 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 				...(cc && {cc}),
 				...(bcc && {bcc}),
 				...(from && {from}),
-				...(inReplyTo && {inReplyTo}),
-				...(references && {references}),
+				...(effectiveInReplyTo && {inReplyTo: effectiveInReplyTo}),
+				...(effectiveReferences && {references: effectiveReferences}),
 				...(resolvedAttachments && {attachments: resolvedAttachments}),
 			});
 
@@ -118,7 +130,10 @@ export function registerDraftCreate(server: McpServer, config: Config): void {
 			}
 
 			const result = await makeGmailApiCall('POST', '/users/me/drafts', config.token, requestBody);
-			return jsonResult(outputSchema.parse(result));
+			return jsonResult(outputSchema.parse({
+				...(result as Record<string, unknown>),
+				...(warning && {threadingWarning: warning}),
+			}));
 		},
 	);
 }

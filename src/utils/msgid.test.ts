@@ -87,7 +87,25 @@ describe('buildThreadHeaders', () => {
 	});
 
 	it('drops an unusable parent rather than emitting a malformed header', () => {
-		expect(buildThreadHeaders('garbage', undefined)).toEqual({});
+		const result = buildThreadHeaders('garbage', undefined);
+		expect(result.inReplyTo).toBeUndefined();
+		expect(result.references).toBeUndefined();
+	});
+
+	it('reports the drop so the caller is not left believing it threaded', () => {
+		expect(buildThreadHeaders('garbage', undefined).warning).toMatch(/inReplyTo/);
+		expect(buildThreadHeaders(undefined, 'garbage').warning).toMatch(/references/);
+		expect(buildThreadHeaders('<a@x.com>', '<b@x.com>').warning).toBeUndefined();
+	});
+
+	it('rejects an over-long id rather than emitting an illegal header line', () => {
+		const huge = `<${'x'.repeat(600)}@x.com>`;
+		expect(buildThreadHeaders(huge, undefined).inReplyTo).toBeUndefined();
+	});
+
+	it('rejects a non-ASCII id, which cannot legally appear raw in a header', () => {
+		expect(buildThreadHeaders('<héllo@dömain.com>', undefined).inReplyTo).toBeUndefined();
+		expect(buildThreadHeaders('<a\u{1F600}@x.com>', undefined).inReplyTo).toBeUndefined();
 	});
 
 	it('repairs escaped input end to end', () => {
