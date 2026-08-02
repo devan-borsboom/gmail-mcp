@@ -5,8 +5,17 @@ import {z} from 'zod';
 
 const safeHeaderString = z.string().regex(/^[^\r\n]*$/, 'Must not contain newline characters');
 
+// Realpath the roots too, so the comparison below is symlink-to-symlink
+// consistent (e.g. if ~/Documents itself is a link into a synced volume).
 const ALLOWED_ROOTS = ['Downloads', 'Documents', 'Desktop', 'yeticonnect-team-data', 'code', 'claude-memory']
-	.map((d) => path.join(os.homedir(), d));
+	.map((d) => path.join(os.homedir(), d))
+	.map((d) => {
+		try {
+			return fs.realpathSync(d);
+		} catch {
+			return d;
+		}
+	});
 
 const MIME_MAP: Record<string, string> = {
 	'.pdf': 'application/pdf',
@@ -72,13 +81,24 @@ export function resolveAttachment(att: Attachment): ResolvedAttachment {
 	const expanded = att.path.startsWith('~')
 		? path.join(os.homedir(), att.path.slice(1).replace(/^[\\/]/, ''))
 		: att.path;
-	const resolved = path.resolve(expanded);
+
+	// path.resolve() is purely lexical: it collapses ".." but does NOT follow
+	// symlinks. A symlink dropped inside an allowed root (say ~/Downloads/x ->
+	// ~/.ssh/id_rsa) would otherwise pass this gate and be read and emailed.
+	// realpath is what actually confines us to the allowlist. Fall back to the
+	// lexical path when the file does not exist so the caller still gets a
+	// clear ENOENT from readFileSync rather than a confusing allowlist error.
+	const lexical = path.resolve(expanded);
+	let resolved = lexical;
+	try {
+		resolved = fs.realpathSync(lexical);
+	} catch {
+		resolved = lexical;
+	}
 
 	const insideAllowed = ALLOWED_ROOTS.some((root) => resolved === root || resolved.startsWith(root + path.sep));
 	if (!insideAllowed) {
-		throw new Error(
-			`Attachment path not allowed: ${resolved}. Must be under one of: ${ALLOWED_ROOTS.join(', ')}`,
-		);
+		throw new Error(`Attachment path not allowed: ${resolved}. Must be under one of: ${ALLOWED_ROOTS.join(', ')}`);
 	}
 
 	const buf = fs.readFileSync(resolved);

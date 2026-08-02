@@ -119,7 +119,7 @@ describe('appendMimeBody', () => {
 		appendMimeBody(lines, 'body', [{filename: 'a.bin', mimeType: 'application/octet-stream', content: longB64}]);
 		const joined = lines.join('\r\n');
 		const segment = joined.split('Content-Disposition: attachment; filename="a.bin"\r\n\r\n')[1] ?? '';
-		const b64Lines = segment.split('\r\n').filter((l) => l.match(/^A+$/));
+		const b64Lines = segment.split('\r\n').filter((l) => /^A+$/.exec(l));
 		expect(b64Lines.length).toBeGreaterThan(1);
 		for (const l of b64Lines) {
 			expect(l.length).toBeLessThanOrEqual(76);

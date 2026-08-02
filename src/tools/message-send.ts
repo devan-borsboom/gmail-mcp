@@ -7,6 +7,7 @@ import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
 	type ResolvedAttachment, appendMimeBody, attachmentSchema, resolveAttachment,
 } from '../utils/mime.js';
+import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
 
 const inputSchema = strictSchemaWithAliases({
 	to: z.string().describe('Recipient email address(es), comma-separated for multiple'),
@@ -17,7 +18,8 @@ const inputSchema = strictSchemaWithAliases({
 	bcc: z.string().optional().describe('BCC recipients, comma-separated'),
 	from: z.string().optional().describe('Sender email address (for send-as aliases)'),
 	threadId: z.string().optional().describe('Thread ID to reply to'),
-	inReplyTo: z.string().optional().describe('Message-ID header of the message being replied to'),
+	inReplyTo: z.string().optional().describe('Message-ID header of the message being replied to, e.g. <abc@mail.gmail.com>'),
+	references: z.string().optional().describe('The References header of the message being replied to. Pass it verbatim and the parent Message-ID is appended automatically, so the recipient sees a correctly threaded reply. Omitting this on a multi-message thread breaks threading for the recipient.'),
 	attachments: z.array(attachmentSchema).optional().describe('Optional file attachments. Each may be {path} (preferred) or {filename, mimeType, content} where content is base64.'),
 }, {});
 
@@ -39,6 +41,7 @@ function createRawMessage(options: {
 	bcc?: string;
 	from?: string;
 	inReplyTo?: string;
+	references?: string;
 	attachments?: ResolvedAttachment[];
 }): string {
 	const lines: string[] = [];
@@ -57,9 +60,17 @@ function createRawMessage(options: {
 	}
 
 	lines.push(`Subject: ${options.subject}`);
-	if (options.inReplyTo) {
-		lines.push(`In-Reply-To: ${options.inReplyTo}`);
-		lines.push(`References: ${options.inReplyTo}`);
+
+	// Sanitise and accumulate rather than echoing the raw parameter: callers
+	// have shipped HTML-escaped ids (&lt;...&gt;), which silently break
+	// threading for the recipient. See utils/msgid.ts.
+	const thread = buildThreadHeaders(options.inReplyTo, options.references);
+	if (thread.inReplyTo) {
+		lines.push(`In-Reply-To: ${thread.inReplyTo}`);
+	}
+
+	if (thread.references) {
+		lines.push(foldHeader('References', thread.references));
 	}
 
 	appendMimeBody(lines, options.body, options.attachments, options.isHtml);
@@ -82,7 +93,7 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 			inputSchema,
 			outputSchema,
 		},
-		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, attachments}) => {
+		async ({to, subject, body, isHtml, cc, bcc, from, threadId, inReplyTo, references, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
 			const raw = createRawMessage({
@@ -94,6 +105,7 @@ export function registerMessageSend(server: McpServer, config: Config): void {
 				...(bcc && {bcc}),
 				...(from && {from}),
 				...(inReplyTo && {inReplyTo}),
+				...(references && {references}),
 				...(resolvedAttachments && {attachments: resolvedAttachments}),
 			});
 

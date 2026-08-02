@@ -31,6 +31,54 @@ function setupSignalHandlers(cleanup: () => Promise<void>): void {
 	});
 }
 
+/**
+ * Hostnames this server will answer for, and the only hosts an OAuth
+ * redirect_uri may point at.
+ *
+ * The server binds 127.0.0.1, but binding alone does not stop a DNS rebinding
+ * attack: a hostile page can resolve its own domain to 127.0.0.1, at which
+ * point the browser treats requests to this server as same-origin and CORS
+ * offers no protection. The defence is to reject any request whose Host or
+ * Origin is not a loopback name (MCP spec, "Security Warning" on the
+ * Streamable HTTP transport).
+ *
+ * Set GMAIL_MCP_EXTRA_HOSTS (comma-separated) only if a client genuinely needs
+ * a non-loopback callback host.
+ */
+const LOOPBACK_HOSTS = new Set([
+	'localhost',
+	'127.0.0.1',
+	'::1',
+	'[::1]',
+	...(process.env.GMAIL_MCP_EXTRA_HOSTS ?? '')
+		.split(',')
+		.map((h) => h.trim().toLowerCase())
+		.filter(Boolean),
+]);
+
+function isLoopbackHostHeader(hostHeader?: string): boolean {
+	if (!hostHeader) {
+		return false;
+	}
+
+	// Strip the port. Bracketed IPv6 literals keep their brackets.
+	const host = hostHeader.replace(/:\d+$/, '').toLowerCase();
+	return LOOPBACK_HOSTS.has(host);
+}
+
+function isLoopbackUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+			return false;
+		}
+
+		return LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+	} catch {
+		return false;
+	}
+}
+
 function extractBearerToken(req: Request): string | undefined {
 	const authHeader = req.headers.authorization;
 	if (!authHeader?.startsWith('Bearer ')) {
@@ -66,6 +114,31 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 		}
 
 		const app = express();
+
+		// Anti-DNS-rebinding gate. Must sit ahead of every route, including the
+		// metadata and OAuth endpoints, so a hostile page cannot reach any of
+		// them by pointing its own hostname at 127.0.0.1.
+		app.use((req: Request, res: Response, next) => {
+			if (!isLoopbackHostHeader(req.headers.host)) {
+				res.status(403).json({
+					error: 'forbidden_host',
+					error_description: 'This server only accepts requests addressed to a loopback host.',
+				});
+				return;
+			}
+
+			const {origin} = req.headers;
+			if (origin && origin !== 'null' && !isLoopbackUrl(origin)) {
+				res.status(403).json({
+					error: 'forbidden_origin',
+					error_description: 'Cross-origin requests are not accepted.',
+				});
+				return;
+			}
+
+			next();
+		});
+
 		app.use(express.json({limit: '20mb'}));
 		app.use(express.urlencoded({extended: true}));
 
@@ -121,6 +194,19 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 		// We encode the client's redirect_uri in state so we can forward the code back
 		app.get('/authorize', (req: Request, res: Response) => {
 			const clientRedirectUri = typeof req.query.redirect_uri === 'string' ? req.query.redirect_uri : '';
+
+			// Without this check the endpoint is an open redirector on an OAuth
+			// authorization flow: a crafted link would walk the user through a
+			// real Google consent screen and then hand the authorization code
+			// to an attacker-controlled host.
+			if (clientRedirectUri && !isLoopbackUrl(clientRedirectUri)) {
+				res.status(400).json({
+					error: 'invalid_request',
+					error_description: 'redirect_uri must point at a loopback host.',
+				});
+				return;
+			}
+
 			const clientState = typeof req.query.state === 'string' ? req.query.state : '';
 			const codeChallenge = typeof req.query.code_challenge === 'string' ? req.query.code_challenge : '';
 			const codeChallengeMethod = typeof req.query.code_challenge_method === 'string' ? req.query.code_challenge_method : 'S256';
@@ -154,6 +240,16 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 
 			try {
 				const {redirect_uri: clientRedirectUri, state: clientState} = JSON.parse(Buffer.from(wrappedState, 'base64url').toString()) as {redirect_uri: string; state: string};
+
+				// Re-validate: the state parameter is attacker-supplied input,
+				// so passing /authorize is not proof this destination is safe.
+				if (!isLoopbackUrl(clientRedirectUri)) {
+					res.status(400).json({
+						error: 'invalid_request',
+						error_description: 'redirect_uri must point at a loopback host.',
+					});
+					return;
+				}
 
 				const params = new URLSearchParams();
 				if (code) {
@@ -226,12 +322,22 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			const server = createServer({token: token ?? ''});
 
 			try {
+				// sessionIdGenerator is omitted rather than set to undefined:
+				// the SDK treats an absent generator as stateless mode, and
+				// under exactOptionalPropertyTypes an explicit undefined is not
+				// assignable. Host/Origin validation is handled by the
+				// middleware above, which is what the SDK now recommends over
+				// its own deprecated allowedHosts/allowedOrigins options.
 				const httpTransport = new StreamableHTTPServerTransport({
-
-					sessionIdGenerator: undefined,
 					enableJsonResponse: true,
 				});
-				await server.connect(httpTransport);
+				// SDK 1.30.0 declares StreamableHTTPServerTransport.onclose as
+				// `(() => void) | undefined`, while the Transport interface it
+				// is passed as declares `onclose?: () => void`. Under
+				// exactOptionalPropertyTypes those are not assignable. This is
+				// an upstream typing mismatch with no runtime component, so it
+				// is cast here rather than relaxing strictness project-wide.
+				await server.connect(httpTransport as unknown as Parameters<typeof server.connect>[0]);
 
 				await httpTransport.handleRequest(req, res, req.body);
 
