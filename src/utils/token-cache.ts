@@ -43,28 +43,52 @@ function tokenCacheGet(token: string): number | undefined {
 	return expiresAt;
 }
 
-export async function isTokenValid(token: string): Promise<boolean> {
+/**
+ * 'unreachable' means Google could not be asked (no network, DNS down, Google 5xx),
+ * which says nothing about the token. It must stay distinct from 'invalid': the
+ * caller answers 'invalid' with 401, and a 401 makes mcp-remote throw away the
+ * session and open a browser for a fresh login. That is exactly what happened on
+ * a cold boot before Wi-Fi was up (2026-09-29). 'unreachable' is never cached.
+ */
+export type TokenStatus = 'valid' | 'invalid' | 'unreachable';
+
+export async function checkToken(token: string): Promise<TokenStatus> {
 	const cachedExpiresAt = tokenCacheGet(token);
 	if (cachedExpiresAt !== undefined) {
 		// Cache hit - check if token is still valid
-		return cachedExpiresAt > Date.now();
+		return cachedExpiresAt > Date.now() ? 'valid' : 'invalid';
 	}
 
 	// Cache miss - call tokeninfo
+	let response: globalThis.Response;
 	try {
-		const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
-		if (!response.ok) {
-			// Invalid token - cache as expired so we don't keep hitting tokeninfo
-			tokenCacheSet(token, Date.now() - TOKEN_CACHE_EXPIRED_BUFFER_MS);
-			return false;
-		}
+		response = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+	} catch {
+		return 'unreachable';
+	}
 
+	if (response.status >= 500) {
+		return 'unreachable';
+	}
+
+	if (!response.ok) {
+		// Invalid token - cache as expired so we don't keep hitting tokeninfo
+		tokenCacheSet(token, Date.now() - TOKEN_CACHE_EXPIRED_BUFFER_MS);
+		return 'invalid';
+	}
+
+	try {
 		const data = await response.json() as {expires_in?: number};
 		const expiresIn = data.expires_in ?? 0;
 		const expiresAt = Date.now() + (expiresIn * 1000);
 		tokenCacheSet(token, expiresAt);
-		return expiresAt > Date.now();
+		return expiresAt > Date.now() ? 'valid' : 'invalid';
 	} catch {
-		return false;
+		return 'unreachable';
 	}
+}
+
+/** Test-only: forget every cached token so each test starts cold. */
+export function clearTokenCache(): void {
+	tokenCache.clear();
 }

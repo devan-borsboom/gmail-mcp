@@ -6,7 +6,7 @@ import {createServer} from './index.js';
 import type {
 	OAuthMetadata, OAuthProtectedResourceMetadata, OAuthClientInformationFull, OAuthClientMetadata,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
-import {isTokenValid} from './utils/token-cache.js';
+import {mcpAuthFailure, proxyTokenRequest} from './utils/auth-gate.js';
 import {createLoopbackGate} from './utils/loopback.js';
 
 // Google OAuth configuration - users must provide their own credentials
@@ -234,17 +234,11 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 					redirect_uri: `${baseUrl}/callback`,
 				});
 
-				const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
-					method: 'POST',
-					headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-					body: body.toString(),
-				});
-
-				const data = await response.json();
-				res.status(response.status).json(data);
+				const result = await proxyTokenRequest(GOOGLE_TOKEN_ENDPOINT, body);
+				res.status(result.status).json(result.body);
 			} catch (error) {
 				console.error('Token exchange error:', error);
-				res.status(500).json({error: 'server_error', error_description: 'Token exchange failed'});
+				res.status(503).json({error: 'temporarily_unavailable', error_description: 'Token exchange failed'});
 			}
 		});
 
@@ -264,13 +258,12 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			}
 
 			// Validate token before processing
-			if (token && !await isTokenValid(token)) {
-				res.status(401).json({
-					jsonrpc: '2.0',
-					error: {code: -32001, message: 'Unauthorized: Invalid or expired token'},
-					id: null,
-				});
-				return;
+			if (token) {
+				const failure = await mcpAuthFailure(token);
+				if (failure) {
+					res.status(failure.status).json(failure.body);
+					return;
+				}
 			}
 
 			const server = createServer({token: token ?? ''});
