@@ -28,15 +28,16 @@ afterEach(() => {
 });
 
 describe('/mcp token gate', () => {
-	it('answers 503, not 401, when Google cannot be reached', async () => {
+	// mcp-remote starts a browser login on 401 and never answers the request on
+	// any other error status, so an outage must let the request through.
+	it('lets the request through, not 401, when Google cannot be reached', async () => {
 		vi.stubGlobal('fetch', vi.fn(networkDown));
-		const failure = await mcpAuthFailure('tok-a');
-		expect(failure?.status).toBe(503);
+		expect(await mcpAuthFailure('tok-a')).toBeUndefined();
 	});
 
-	it('answers 503 when tokeninfo itself returns a 5xx', async () => {
+	it('lets the request through when tokeninfo itself returns a 5xx', async () => {
 		vi.stubGlobal('fetch', vi.fn(reply(502, 'Bad Gateway')));
-		expect((await mcpAuthFailure('tok-b'))?.status).toBe(503);
+		expect(await mcpAuthFailure('tok-b')).toBeUndefined();
 	});
 
 	it('still answers 401 for a token Google rejects', async () => {
@@ -49,11 +50,11 @@ describe('/mcp token gate', () => {
 		expect(await mcpAuthFailure('tok-d')).toBeUndefined();
 	});
 
-	it('does not remember an outage: the same token passes once Google is back', async () => {
+	it('does not remember an outage: a dead token is still refused once Google is back', async () => {
 		vi.stubGlobal('fetch', vi.fn(networkDown));
-		expect((await mcpAuthFailure('tok-e'))?.status).toBe(503);
-		vi.stubGlobal('fetch', vi.fn(reply(200, {expires_in: 3600})));
 		expect(await mcpAuthFailure('tok-e')).toBeUndefined();
+		vi.stubGlobal('fetch', vi.fn(reply(400, {error: 'invalid_token'})));
+		expect((await mcpAuthFailure('tok-e'))?.status).toBe(401);
 	});
 });
 
@@ -93,6 +94,11 @@ describe('/token proxy, as read by the real SDK refresh code', () => {
 
 	it('Google 5xx with a JSON body: temporarily_unavailable', async () => {
 		const error = await clientSees(reply(500, {error: 'internal_failure'}));
+		expect(error).toBeInstanceOf(TemporarilyUnavailableError);
+	});
+
+	it('Google rate limit (429): temporarily_unavailable', async () => {
+		const error = await clientSees(reply(429, {error: 'rate_limit_exceeded'}));
 		expect(error).toBeInstanceOf(TemporarilyUnavailableError);
 	});
 

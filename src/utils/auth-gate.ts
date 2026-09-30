@@ -6,8 +6,13 @@ import {checkToken} from './token-cache.js';
  * bad", because mcp-remote (the client in front of every daemon) reacts to the
  * two very differently:
  *
- * - A 401 from /mcp starts its auth flow. A 503 is just a failed request that
- *   the next call retries.
+ * - A 401 from /mcp starts its auth flow. Any other non-2xx is worse than
+ *   useless: mcp-remote logs it and never answers the JSON-RPC request, so the
+ *   tool call hangs, and after a refresh it can wedge the relay for good. So
+ *   when Google cannot be reached to check the token, /mcp lets the request
+ *   through. The tool's own Gmail call then fails fast as an ordinary tool
+ *   error, and the next request checks the token again (an outage is never
+ *   cached).
  * - Inside that auth flow, a refresh that fails with a ServerError (which is
  *   what `server_error` and any non-OAuth body parse to) falls through to
  *   opening a browser for a fresh login. A refresh that fails with
@@ -21,15 +26,8 @@ export type GateResult = {status: number; body: unknown};
 
 export async function mcpAuthFailure(token: string): Promise<GateResult | undefined> {
 	const status = await checkToken(token);
-	if (status === 'valid') {
+	if (status === 'valid' || status === 'unreachable') {
 		return undefined;
-	}
-
-	if (status === 'unreachable') {
-		return {
-			status: 503,
-			body: {jsonrpc: '2.0', error: {code: -32000, message: 'Google unreachable, try again shortly'}, id: null},
-		};
 	}
 
 	return {
@@ -59,11 +57,11 @@ export async function proxyTokenRequest(endpoint: string, form: URLSearchParams)
 		return temporarilyUnavailable();
 	}
 
-	// A Google 5xx says nothing about the refresh token, so it must not reach the
-	// client as a server_error (which would open a browser). Its 4xx answers,
-	// such as invalid_grant for a revoked token, pass through untouched so a
-	// genuinely dead login still triggers a fresh sign-in.
-	if (response.status >= 500) {
+	// A Google 5xx or 429 says nothing about the refresh token, so it must not
+	// reach the client as a server_error (which would open a browser). Its other
+	// 4xx answers, such as invalid_grant for a revoked token, pass through
+	// untouched so a genuinely dead login still triggers a fresh sign-in.
+	if (response.status >= 500 || response.status === 429) {
 		console.error('Token exchange error: Google returned HTTP', response.status);
 		return temporarilyUnavailable();
 	}
