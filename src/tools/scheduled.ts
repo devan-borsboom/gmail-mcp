@@ -5,8 +5,8 @@ import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
-	SCHEDULE_HEADER, SCHEDULE_LABEL, decodeRaw, encodeRaw, ensureScheduleLabel, findScheduleLabel,
-	parseSendAt, readScheduleMarker, sendAtSchema, setScheduleMarker,
+	SCHEDULE_HEADER, SCHEDULE_LABEL, assertNotSending, decodeRaw, ensureScheduleLabel, findScheduleLabel,
+	getRawDraft, markerOf, mountainTime, parseSendAt, readScheduleMarker, rewriteMarker, sendAtSchema,
 } from '../utils/schedule.js';
 
 // A scheduled draft this many minutes past due means the Apps Script is not
@@ -25,24 +25,7 @@ function header(meta: MessageMeta, name: string): string | undefined {
 	return meta.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value;
 }
 
-/**
- * Rewrite a draft's marker header: set it to `when`, or remove it when `when`
- * is undefined. drafts.update replaces the whole message, so the raw source is
- * fetched, edited in the header block only, and written back with its thread.
- */
-async function rewriteMarker(token: string, draftId: string, when: Date | undefined): Promise<{messageId: string; threadId: string}> {
-	const draft = await makeGmailApiCall('GET', `/users/me/drafts/${encodeURIComponent(draftId)}?format=raw`, token) as {
-		id: string; message: {id: string; threadId: string; raw: string};
-	};
-	const raw = encodeRaw(setScheduleMarker(decodeRaw(draft.message.raw), when));
-	const updated = await makeGmailApiCall('PUT', `/users/me/drafts/${encodeURIComponent(draftId)}`, token, {
-		id: draftId,
-		message: {raw, threadId: draft.message.threadId},
-	}) as {id: string; message: {id: string; threadId: string}};
-	return {messageId: updated.message.id, threadId: updated.message.threadId};
-}
-
-async function setLabel(token: string, messageId: string, on: boolean): Promise<string | undefined> {
+export async function setLabel(token: string, messageId: string, on: boolean): Promise<string | undefined> {
 	try {
 		const labelId = on ? await ensureScheduleLabel(token) : await findScheduleLabel(token);
 		if (!labelId) {
@@ -62,6 +45,7 @@ const listOutput = z.object({
 		messageId: z.string(),
 		threadId: z.string(),
 		sendAt: z.string(),
+		sendAtLocal: z.string(),
 		to: z.string().optional(),
 		subject: z.string().optional(),
 		overdue: z.boolean(),
@@ -106,10 +90,16 @@ export function registerScheduledList(server: McpServer, config: Config): void {
 			}
 
 			const now = Date.now();
-			const metas = await Promise.all(drafts.filter((d) => d.message?.id).map(async (d) => ({
-				draft: d,
-				meta: await makeGmailApiCall('GET', `/users/me/messages/${d.message!.id}?${metaParams.toString()}`, config.token) as MessageMeta,
-			})));
+			// Ten at a time, so a large Drafts folder does not trip Gmail's rate limit.
+			const withMessage = drafts.filter((d) => d.message?.id);
+			const metas: {draft: DraftRef; meta: MessageMeta}[] = [];
+			for (let i = 0; i < withMessage.length; i += 10) {
+				// eslint-disable-next-line no-await-in-loop
+				metas.push(...await Promise.all(withMessage.slice(i, i + 10).map(async (d) => ({
+					draft: d,
+					meta: await makeGmailApiCall('GET', `/users/me/messages/${d.message!.id}?${metaParams.toString()}`, config.token) as MessageMeta,
+				}))));
+			}
 
 			const scheduled = metas.flatMap(({draft, meta}) => {
 				const when = readScheduleMarker(meta.payload?.headers);
@@ -124,6 +114,7 @@ export function registerScheduledList(server: McpServer, config: Config): void {
 					messageId: meta.id,
 					threadId: meta.threadId,
 					sendAt: when.toISOString(),
+					sendAtLocal: mountainTime(when),
 					...(to !== undefined && {to}),
 					...(subject !== undefined && {subject}),
 					overdue: now - when.getTime() > OVERDUE_MINUTES * 60 * 1000,
@@ -145,6 +136,7 @@ const updateOutput = z.object({
 	messageId: z.string(),
 	threadId: z.string(),
 	sendAt: z.string(),
+	sendAtLocal: z.string(),
 	labelWarning: z.string().optional(),
 });
 
@@ -162,10 +154,12 @@ export function registerScheduledUpdate(server: McpServer, config: Config): void
 		},
 		async ({draftId, sendAt}) => {
 			const when = parseSendAt(sendAt);
-			const {messageId, threadId} = await rewriteMarker(config.token, draftId, when);
+			const draft = await getRawDraft(config.token, draftId);
+			assertNotSending(markerOf(decodeRaw(draft.message.raw)));
+			const {messageId, threadId} = await rewriteMarker(config.token, draft, when);
 			const labelWarning = await setLabel(config.token, messageId, true);
 			return jsonResult(updateOutput.parse({
-				draftId, messageId, threadId, sendAt: when.toISOString(), ...(labelWarning && {labelWarning}),
+				draftId, messageId, threadId, sendAt: when.toISOString(), sendAtLocal: mountainTime(when), ...(labelWarning && {labelWarning}),
 			}));
 		},
 	);
@@ -191,12 +185,14 @@ export function registerScheduledCancel(server: McpServer, config: Config): void
 			outputSchema: cancelOutput,
 		},
 		async ({draftId, delete: remove}) => {
+			const draft = await getRawDraft(config.token, draftId);
+			assertNotSending(markerOf(decodeRaw(draft.message.raw)));
 			if (remove) {
 				await makeGmailApiCall('DELETE', `/users/me/drafts/${encodeURIComponent(draftId)}`, config.token);
 				return jsonResult(cancelOutput.parse({draftId, cancelled: true, deleted: true}));
 			}
 
-			const {messageId} = await rewriteMarker(config.token, draftId, undefined);
+			const {messageId} = await rewriteMarker(config.token, draft, undefined);
 			const labelWarning = await setLabel(config.token, messageId, false);
 			return jsonResult(cancelOutput.parse({
 				draftId, cancelled: true, deleted: false, ...(labelWarning && {labelWarning}),

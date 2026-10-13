@@ -1,19 +1,19 @@
 import {readFileSync} from 'node:fs';
-import {fileURLToPath} from 'node:url';
+import path from 'node:path';
 import vm from 'node:vm';
 import {describe, it, expect, beforeEach} from 'vitest';
 
 // Runs apps-script/scheduled-send.gs against an in-memory fake of the Apps
 // Script runtime, so the send logic is exercised before it is pasted into a
 // Google account.
-const SCRIPT = readFileSync(fileURLToPath(new URL('../../apps-script/scheduled-send.gs', import.meta.url)), 'utf8');
+const SCRIPT = readFileSync(path.join(__dirname, '../../apps-script/scheduled-send.gs'), 'utf8');
 
 type Draft = {id: string; messageId: string; threadId: string; raw: string; labels: string[]};
 
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url');
 const unb64 = (s: string) => Buffer.from(s, 'base64url').toString('utf8');
 
-function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean} = {}) {
+function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean; sendThenThrow?: boolean} = {}) {
 	const drafts = new Map<string, Draft>();
 	const sent: {raw: string; threadId: string}[] = [];
 	const alerts: {to: string; subject: string}[] = [];
@@ -54,6 +54,10 @@ function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean} = {}) {
 				const d = drafts.get(res.id)!;
 				drafts.delete(res.id);
 				sent.push({raw: d.raw, threadId: d.threadId});
+				if (opts.sendThenThrow) {
+					throw new Error('backend timeout after delivery');
+				}
+
 				return {id: `s${nextMsg++}`, threadId: d.threadId};
 			},
 		},
@@ -180,6 +184,31 @@ describe('scheduled-send.gs', () => {
 		expect(rt.alerts).toHaveLength(1);
 		expect(rt.alerts[0]!.subject).toMatch(/lost its send time/);
 		expect(rt.sent).toHaveLength(0);
+	});
+
+	it('finding 4: holds an email more than 2 hours late, alerts once, never sends it', () => {
+		const stale = new Date(Date.now() - (3 * 3_600_000)).toISOString();
+		rt.add('d1', msg(stale, 'See you tomorrow'));
+		rt.run();
+		rt.run();
+		expect(rt.sent).toHaveLength(0);
+		expect(rt.alerts.map((a) => a.subject)).toEqual(['Scheduled email NOT sent, too late: See you tomorrow']);
+		expect(rt.drafts.has('d1')).toBe(true);
+	});
+
+	it('finding 4: still sends an email under 2 hours late', () => {
+		rt.add('d1', msg(new Date(Date.now() - (90 * 60_000)).toISOString()));
+		rt.run();
+		expect(rt.sent).toHaveLength(1);
+	});
+
+	it('finding 3: a send that went out but errored says "probably sent", not FAILED', () => {
+		rt = makeRuntime({sendThenThrow: true});
+		rt.add('d1', msg(past));
+		rt.run();
+		expect(rt.sent).toHaveLength(1);
+		expect(rt.alerts.map((a) => a.subject)).toEqual(['Scheduled email probably sent, please check: Hi']);
+		expect(rt.props.has('failed:d1')).toBe(false);
 	});
 
 	it('reports a send interrupted part-way', () => {

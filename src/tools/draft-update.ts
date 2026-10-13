@@ -7,6 +7,10 @@ import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
 	appendMimeBody, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
+import {
+	assertNotSending, decodeRaw, getRawDraft, markerOf, scheduleHeaderLine,
+} from '../utils/schedule.js';
+import {setLabel} from './scheduled.js';
 
 const inputSchema = strictSchemaWithAliases({
 	draftId: z.string().describe('The ID of the draft to update'),
@@ -40,7 +44,14 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 		async ({draftId, to, subject, body, isHtml, cc, bcc, from, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
+			// A scheduled draft keeps its send time through an edit: this tool
+			// rebuilds the whole message, which would otherwise drop the marker
+			// and leave an email that silently never sends.
+			const marker = markerOf(decodeRaw((await getRawDraft(config.token, draftId)).message.raw));
+			assertNotSending(marker);
+
 			const lines = [
+				...(marker ? [scheduleHeaderLine(marker)] : []),
 				...(from ? [`From: ${from}`] : []),
 				...(to ? [`To: ${to}`] : []),
 				...(subject ? [`Subject: ${subject}`] : []),
@@ -56,7 +67,12 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 			const result = await makeGmailApiCall('PUT', `/users/me/drafts/${draftId}`, config.token, {
 				message: {raw: encodedEmail},
 			});
-			return jsonResult(outputSchema.parse(result));
+			const parsed = outputSchema.parse(result);
+			if (marker && parsed.message) {
+				await setLabel(config.token, parsed.message.id, true);
+			}
+
+			return jsonResult(parsed);
 		},
 	);
 }

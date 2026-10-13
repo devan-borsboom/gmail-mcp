@@ -31,7 +31,11 @@ export function parseSendAt(value: string, now: Date = new Date()): Date {
 	}
 
 	const when = new Date(value);
-	if (Number.isNaN(when.getTime())) {
+	// Date() rolls an impossible day forward (Feb 30 -> Mar 2), so check the
+	// calendar date survives the round trip.
+	const [y, m, d] = value.slice(0, 10).split('-').map(Number) as [number, number, number];
+	const calendar = new Date(Date.UTC(y, m - 1, d));
+	if (Number.isNaN(when.getTime()) || calendar.getUTCMonth() !== m - 1 || calendar.getUTCDate() !== d) {
 		throw new Error(`sendAt "${value}" is not a real date`);
 	}
 
@@ -45,6 +49,13 @@ export function parseSendAt(value: string, now: Date = new Date()): Date {
 	}
 
 	return when;
+}
+
+/** Devan's local reading of an instant, so a wrong offset is visible before it is approved. */
+export function mountainTime(when: Date): string {
+	return when.toLocaleString('en-US', {
+		timeZone: 'America/Edmonton', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+	});
 }
 
 /** The marker header line, always in UTC so the script never parses a zone. */
@@ -127,4 +138,50 @@ export async function ensureScheduleLabel(token: string): Promise<string> {
 export async function findScheduleLabel(token: string): Promise<string | undefined> {
 	const listed = await makeGmailApiCall('GET', '/users/me/labels', token) as {labels?: {id: string; name: string}[]};
 	return listed.labels?.find((l) => l.name === SCHEDULE_LABEL)?.id;
+}
+
+// The Apps Script sends a due draft within about 5 minutes. Touching a draft in
+// that window races it: the edit can land between its strip and its send.
+export const SENDING_WINDOW_MS = 10 * 60 * 1000;
+
+type RawDraft = {id: string; message: {id: string; threadId: string; raw: string}};
+
+export async function getRawDraft(token: string, draftId: string): Promise<RawDraft> {
+	return await makeGmailApiCall('GET', `/users/me/drafts/${encodeURIComponent(draftId)}?format=raw`, token) as RawDraft;
+}
+
+/** The marker in a raw message's header block, if any. */
+export function markerOf(message: string): Date | undefined {
+	const head = message.split(/\r?\n\r?\n/)[0] ?? '';
+	const lines = head.split(/\r?\n/).map((l) => ({name: l.split(':')[0] ?? '', value: l.slice(l.indexOf(':') + 1)}));
+	return readScheduleMarker(lines.filter((l) => l.name.toLowerCase() === SCHEDULE_HEADER.toLowerCase()));
+}
+
+/**
+ * Refuse to touch a draft the script may be sending right now. Past the window
+ * the script is presumed down, so the draft may be changed freely.
+ */
+export function assertNotSending(when: Date | undefined, now: number = Date.now()): void {
+	if (!when) {
+		return;
+	}
+
+	const overdue = now - when.getTime();
+	if (overdue >= 0 && overdue < SENDING_WINDOW_MS) {
+		throw new Error(`This email was due at ${mountainTime(when)} and may be sending right now. Wait ${Math.ceil((SENDING_WINDOW_MS - overdue) / 60000)} minutes, then check Sent before changing it.`);
+	}
+}
+
+/**
+ * Rewrite a draft's marker: set it to `when`, or remove it when undefined.
+ * drafts.update replaces the whole message, so the raw source is fetched,
+ * edited in the header block only, and written back with its thread.
+ */
+export async function rewriteMarker(token: string, draft: RawDraft, when: Date | undefined): Promise<{messageId: string; threadId: string}> {
+	const raw = encodeRaw(setScheduleMarker(decodeRaw(draft.message.raw), when));
+	const updated = await makeGmailApiCall('PUT', `/users/me/drafts/${encodeURIComponent(draft.id)}`, token, {
+		id: draft.id,
+		message: {raw, threadId: draft.message.threadId},
+	}) as {id: string; message: {id: string; threadId: string}};
+	return {messageId: updated.message.id, threadId: updated.message.threadId};
 }

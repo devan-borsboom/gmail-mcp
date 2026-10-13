@@ -63,6 +63,12 @@ describe('parseSendAt', () => {
 		expect(() => parseSendAt('2027-10-13T12:00:00Z', now)).toThrow(/365 days/);
 	});
 
+	it('finding 7: refuses an impossible calendar date', () => {
+		expect(() => parseSendAt('2027-02-30T08:00:00-07:00', now)).toThrow(/not a real date/);
+		expect(() => parseSendAt('2026-11-31T08:00:00-07:00', now)).toThrow(/not a real date/);
+		expect(parseSendAt('2028-02-29T08:00:00-07:00', new Date('2027-12-01T00:00:00Z')).toISOString()).toBe('2028-02-29T15:00:00.000Z');
+	});
+
 	it('refuses a newline smuggled into the value', () => {
 		expect(() => parseSendAt('2026-10-13T08:00:00Z\r\nBcc: x@evil.test', now)).toThrow();
 	});
@@ -175,9 +181,9 @@ describe('scheduled_update and scheduled_cancel', () => {
 	});
 
 	it('cancel with delete removes the draft and rewrites nothing', async () => {
-		routeApi({'DELETE /users/me/drafts/d1': () => ({})});
+		routeApi({...draftRoutes(), 'DELETE /users/me/drafts/d1': () => ({})});
 		const res = await tools.get('scheduled_cancel')!({draftId: 'd1', delete: true});
-		expect(calls().map(([m]) => m)).toEqual(['DELETE']);
+		expect(calls().map(([m]) => m)).toEqual(['GET', 'DELETE']);
 		expect(res.structuredContent).toMatchObject({deleted: true});
 	});
 });
@@ -212,5 +218,77 @@ describe('scheduled_list', () => {
 	it('reads the marker case-insensitively and ignores garbage', () => {
 		expect(readScheduleMarker([{name: 'x-scheduled-send', value: '2026-10-13T14:00:00.000Z'}])?.toISOString()).toBe('2026-10-13T14:00:00.000Z');
 		expect(readScheduleMarker([{name: 'X-Scheduled-Send', value: 'soon'}])).toBeUndefined();
+	});
+});
+
+describe('attack round 1 fixes', () => {
+	const dueIn = (min: number) => new Date(Date.now() + (min * 60_000)).toISOString();
+	const scheduled = (marker: string) => `X-Scheduled-Send: ${marker}\r\nTo: a@example.com\r\nSubject: hi\r\n\r\nbody`;
+	const routes = (raw: string) => ({
+		'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(raw)}}),
+		'PUT /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm2', threadId: 't1'}}),
+		'GET /users/me/labels': () => ({labels: [{id: 'Label_9', name: 'Scheduled-Send'}]}),
+		'POST /users/me/messages/m2/modify': () => ({}),
+		'POST /users/me/drafts/send': () => ({id: 's1', threadId: 't1'}),
+		'DELETE /users/me/drafts/d1': () => ({}),
+	});
+	const putRaw = () => decode(((calls().find(([m]) => m === 'PUT')![3]) as {message: {raw: string}}).message.raw);
+
+	it('finding 1: draft_update keeps the send time and the label on a scheduled draft', async () => {
+		const marker = dueIn(120);
+		routeApi(routes(scheduled(marker)));
+		await tools.get('draft_update')!({draftId: 'd1', body: 'new wording'});
+		expect(putRaw()).toMatch(new RegExp(`^X-Scheduled-Send: ${new Date(marker).toISOString()}`));
+		expect(calls().some(([m, e, , b]) => m === 'POST' && e === '/users/me/messages/m2/modify' && JSON.stringify(b) === JSON.stringify({addLabelIds: ['Label_9']}))).toBe(true);
+	});
+
+	it('finding 1: draft_update on a plain draft adds no marker', async () => {
+		routeApi(routes('To: a@example.com\r\nSubject: hi\r\n\r\nbody'));
+		await tools.get('draft_update')!({draftId: 'd1', body: 'new wording'});
+		expect(putRaw()).not.toContain('X-Scheduled-Send');
+	});
+
+	for (const [tool, args] of [
+		['scheduled_update', {draftId: 'd1', sendAt: inMinutes(60)}],
+		['scheduled_cancel', {draftId: 'd1'}],
+		['scheduled_cancel', {draftId: 'd1', delete: true}],
+		['draft_update', {draftId: 'd1', body: 'x'}],
+	] as const) {
+		it(`finding 2: ${tool} ${JSON.stringify(args)} refuses while the script may be sending, changing nothing`, async () => {
+			routeApi(routes(scheduled(dueIn(-3))));
+			await expect(tools.get(tool)!(args)).rejects.toThrow(/may be sending right now/);
+			expect(calls().filter(([m]) => m !== 'GET')).toHaveLength(0);
+		});
+	}
+
+	it('finding 2: a draft long overdue (script down) can still be cancelled', async () => {
+		routeApi(routes(scheduled(dueIn(-60))));
+		const res = await tools.get('scheduled_cancel')!({draftId: 'd1'});
+		expect(res.structuredContent.cancelled).toBe(true);
+		expect(putRaw()).not.toContain('X-Scheduled-Send');
+	});
+
+	it('finding 5: draft_send strips the marker before sending a scheduled draft', async () => {
+		routeApi(routes(scheduled(dueIn(120))));
+		await tools.get('draft_send')!({draftId: 'd1'});
+		const order = calls().map(([m, e]) => `${m} ${e.split('?')[0]}`);
+		expect(order.indexOf('PUT /users/me/drafts/d1')).toBeLessThan(order.indexOf('POST /users/me/drafts/send'));
+		expect(putRaw()).not.toContain('X-Scheduled-Send');
+	});
+
+	it('finding 5: draft_send on a plain draft sends it untouched', async () => {
+		routeApi(routes('To: a@example.com\r\nSubject: hi\r\n\r\nbody'));
+		await tools.get('draft_send')!({draftId: 'd1'});
+		expect(calls().some(([m]) => m === 'PUT')).toBe(false);
+	});
+
+	it('finding 6: the result shows the send time in Mountain time', async () => {
+		routeApi({
+			'POST /users/me/drafts': () => ({id: 'd1', message: {id: 'm1', threadId: 't1'}}),
+			'GET /users/me/labels': () => ({labels: [{id: 'Label_9', name: 'Scheduled-Send'}]}),
+			'POST /users/me/messages/m1/modify': () => ({}),
+		});
+		const res = await tools.get('draft_schedule')!({to: 'a@example.com', subject: 'Hi', body: 'b', sendAt: '2027-01-12T08:00:00-06:00'});
+		expect(res.structuredContent.sendAtLocal).toMatch(/Jan 12.*7:00\sAM MST/);
 	});
 });

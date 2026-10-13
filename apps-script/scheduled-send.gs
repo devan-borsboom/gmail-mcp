@@ -23,6 +23,10 @@ const ALERT_TO = '';
 const FULL_SCAN_MINUTES = 60;
 // A send interrupted part-way (script killed) is reported after this long.
 const INFLIGHT_ALERT_MINUTES = 15;
+// An email this late is held and reported instead of sent: "see you tomorrow"
+// arriving days late is worse than not arriving. Happens only when this script
+// was not running at the time (first install, or after an outage).
+const MAX_LATE_MINUTES = 120;
 
 function install() {
   uninstall();
@@ -92,7 +96,14 @@ function run_() {
       return;
     }
     if (props.getProperty('failed:' + d.id) === marker) {
-      return; // already failed at this time and alerted; a reschedule retries it
+      return; // already failed or held at this time and alerted; a reschedule retries it
+    }
+    if (now - when.getTime() > MAX_LATE_MINUTES * 60000) {
+      props.setProperty('failed:' + d.id, marker);
+      alert_('Scheduled email NOT sent, too late: ' + subject,
+        'The scheduled email "' + subject + '" was due at ' + marker + ', more than ' + (MAX_LATE_MINUTES / 60)
+        + ' hours ago, so it was held rather than sent late. It is still in Drafts. Ask Claude to reschedule it, or send it from Gmail.');
+      return;
     }
     sendOne_(props, d.id, marker, subject);
   });
@@ -117,6 +128,14 @@ function sendOne_(props, draftId, marker, subject) {
     removeLabel_(sent.id);
   } catch (e) {
     props.deleteProperty(inflightKey);
+    // A send that went through but whose reply was lost (timeout, server
+    // error) leaves no draft behind. Say so, rather than inviting a resend.
+    if (!draftExists_(draftId)) {
+      alert_('Scheduled email probably sent, please check: ' + subject,
+        'Sending "' + subject + '" (due ' + marker + ') reported an error, but the draft is gone, so it most likely went out.'
+        + '\n\nError: ' + e + '\n\nCheck Sent before sending it again.');
+      return;
+    }
     props.setProperty('failed:' + draftId, marker);
     // Put the send time back so the draft stays visible as overdue (Claude's
     // scheduled_list and the morning check both flag it) instead of becoming
@@ -134,6 +153,15 @@ function sendOne_(props, draftId, marker, subject) {
     alert_('Scheduled email FAILED to send: ' + subject,
       'The scheduled email "' + subject + '" (due ' + marker + ') could not be sent.\n\nError: ' + e
       + '\n\nIt is still in Drafts. Send it from Gmail, or ask Claude to reschedule it.');
+  }
+}
+
+function draftExists_(draftId) {
+  try {
+    Gmail.Users.Drafts.get('me', draftId, {format: 'minimal'});
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 

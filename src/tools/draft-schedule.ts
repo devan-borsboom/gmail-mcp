@@ -6,7 +6,7 @@ import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
 import {attachmentSchema, resolveAttachment, safeHeaderString} from '../utils/mime.js';
 import {fetchThreadHeaders} from '../utils/thread-context.js';
-import {ensureScheduleLabel, parseSendAt, sendAtSchema} from '../utils/schedule.js';
+import {ensureScheduleLabel, mountainTime, parseSendAt, sendAtSchema} from '../utils/schedule.js';
 import {createRawMessage} from './draft-create.js';
 
 const inputSchema = strictSchemaWithAliases({
@@ -29,6 +29,7 @@ const outputSchema = z.object({
 	messageId: z.string(),
 	threadId: z.string(),
 	sendAt: z.string(),
+	sendAtLocal: z.string(),
 	labelWarning: z.string().optional(),
 	threadingWarning: z.string().optional(),
 });
@@ -87,7 +88,7 @@ export function registerDraftSchedule(server: McpServer, config: Config): void {
 					addLabelIds: [labelId],
 				});
 			} catch (error) {
-				labelWarning = `Scheduled, but the ${'Scheduled-Send'} label could not be applied: ${error instanceof Error ? error.message : String(error)}`;
+				labelWarning = `Scheduled, but the Scheduled-Send label could not be applied: ${error instanceof Error ? error.message : String(error)}`;
 			}
 
 			const threadingWarning = [recovered.warning, warning].filter(Boolean).join(' ');
@@ -96,6 +97,7 @@ export function registerDraftSchedule(server: McpServer, config: Config): void {
 				messageId: draft.message.id,
 				threadId: draft.message.threadId,
 				sendAt: when.toISOString(),
+				sendAtLocal: mountainTime(when),
 				...(labelWarning && {labelWarning}),
 				...(threadingWarning && {threadingWarning}),
 			}));
