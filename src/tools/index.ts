@@ -32,6 +32,8 @@ import {registerDraftsList} from './drafts-list.js';
 import {registerDraftUpdate} from './draft-update.js';
 import {registerDraftDelete} from './draft-delete.js';
 import {registerDraftSend} from './draft-send.js';
+import {registerDraftSchedule} from './draft-schedule.js';
+import {registerScheduledList, registerScheduledUpdate, registerScheduledCancel} from './scheduled.js';
 
 // Labels
 import {registerLabelsList} from './labels-list.js';
@@ -87,6 +89,10 @@ export function registerAll(server: McpServer, config: Config): void {
 	registerDraftUpdate(server, config);
 	registerDraftDelete(server, config);
 	registerDraftSend(server, config);
+	registerDraftSchedule(server, config);
+	registerScheduledList(server, config);
+	registerScheduledUpdate(server, config);
+	registerScheduledCancel(server, config);
 
 	// Labels
 	registerLabelsList(server, config);

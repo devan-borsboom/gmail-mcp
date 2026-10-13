@@ -9,6 +9,7 @@ import {
 } from '../utils/mime.js';
 import {buildThreadHeaders, foldHeader} from '../utils/msgid.js';
 import {fetchThreadHeaders} from '../utils/thread-context.js';
+import {scheduleHeaderLine} from '../utils/schedule.js';
 
 const inputSchema = strictSchemaWithAliases({
 	to: safeHeaderString.describe('Recipient email address(es), comma-separated for multiple'),
@@ -37,7 +38,7 @@ const outputSchema = z.object({
 /**
  * Create an RFC 2822 formatted email message and base64url encode it.
  */
-function createRawMessage(options: {
+export function createRawMessage(options: {
 	to: string;
 	subject: string;
 	body: string;
@@ -48,8 +49,13 @@ function createRawMessage(options: {
 	inReplyTo?: string;
 	references?: string;
 	attachments?: ResolvedAttachment[];
+	scheduleAt?: Date;
 }): {raw: string; warning?: string} {
 	const lines: string[] = [];
+
+	if (options.scheduleAt) {
+		lines.push(scheduleHeaderLine(options.scheduleAt));
+	}
 
 	if (options.from) {
 		lines.push(`From: ${options.from}`);
