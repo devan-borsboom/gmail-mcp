@@ -4,7 +4,9 @@ import type {Config} from './types.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
-import {decodeRaw, getRawDraft, markerOf, rewriteMarker} from '../utils/schedule.js';
+import {
+	assertNotSending, decodeRaw, getRawDraft, markerOf, rewriteMarker,
+} from '../utils/schedule.js';
 
 const inputSchema = strictSchemaWithAliases({
 	draftId: z.string().describe('The ID of the draft to send'),
@@ -29,7 +31,9 @@ export function registerDraftSend(server: McpServer, config: Config): void {
 			// Sending a scheduled draft now: strip its marker first so the
 			// recipient never sees the internal header.
 			const draft = await getRawDraft(config.token, draftId);
-			if (markerOf(decodeRaw(draft.message.raw))) {
+			const marker = markerOf(decodeRaw(draft.message.raw));
+			if (marker) {
+				assertNotSending(marker);
 				await rewriteMarker(config.token, draft, undefined);
 			}
 

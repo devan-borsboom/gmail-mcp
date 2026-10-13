@@ -13,7 +13,7 @@ type Draft = {id: string; messageId: string; threadId: string; raw: string; labe
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url');
 const unb64 = (s: string) => Buffer.from(s, 'base64url').toString('utf8');
 
-function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean; sendThenThrow?: boolean} = {}) {
+function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean; sendThenThrow?: boolean; failExistenceCheck?: boolean} = {}) {
 	const drafts = new Map<string, Draft>();
 	const sent: {raw: string; threadId: string}[] = [];
 	const alerts: {to: string; subject: string}[] = [];
@@ -35,8 +35,16 @@ function makeRuntime(opts: {rawAsBytes?: boolean; failSend?: boolean; sendThenTh
 				const all = [...drafts.values()].filter((d) => !args.q || d.labels.includes('L1'));
 				return {drafts: all.map((d) => ({id: d.id, message: {id: d.messageId, threadId: d.threadId}}))};
 			},
-			get(_u: string, id: string) {
-				const d = drafts.get(id)!;
+			get(_u: string, id: string, args?: {format?: string}) {
+				if (args?.format === 'minimal' && opts.failExistenceCheck) {
+					throw new Error('API call to gmail.users.drafts.get failed with error: Quota exceeded');
+				}
+
+				const d = drafts.get(id);
+				if (!d) {
+					throw new Error('API call to gmail.users.drafts.get failed with error: Requested entity was not found.');
+				}
+
 				return {id, message: {id: d.messageId, threadId: d.threadId, raw: opts.rawAsBytes ? [...Buffer.from(d.raw, 'utf8')] : b64(d.raw)}};
 			},
 			update(res: {message: {raw: string; threadId: string}}, _u: string, id: string) {
@@ -182,7 +190,7 @@ describe('scheduled-send.gs', () => {
 		rt.run();
 		rt.run();
 		expect(rt.alerts).toHaveLength(1);
-		expect(rt.alerts[0]!.subject).toMatch(/lost its send time/);
+		expect(rt.alerts[0]!.subject).toMatch(/has no send time/);
 		expect(rt.sent).toHaveLength(0);
 	});
 
@@ -209,6 +217,36 @@ describe('scheduled-send.gs', () => {
 		expect(rt.sent).toHaveLength(1);
 		expect(rt.alerts.map((a) => a.subject)).toEqual(['Scheduled email probably sent, please check: Hi']);
 		expect(rt.props.has('failed:d1')).toBe(false);
+	});
+
+	it('round 2 #3: send fails and Gmail cannot confirm -> FAILED "check Sent", never "probably sent"', () => {
+		rt = makeRuntime({failSend: true, failExistenceCheck: true});
+		rt.add('d1', msg(past));
+		rt.run();
+		expect(rt.alerts).toHaveLength(1);
+		expect(rt.alerts[0]!.subject).toMatch(/FAILED/);
+		expect(rt.props.has('failed:d1')).toBe(true);
+		expect(rt.sent).toHaveLength(0);
+	});
+
+	it('round 2 #9: forgets notes for drafts that no longer exist, keeps live ones', () => {
+		rt.add('d1', msg(future));
+		rt.props.set('failed:gone', 'x');
+		rt.props.set('nomarker:gone', '1');
+		rt.props.set('failed:d1', 'y');
+		rt.run();
+		expect(rt.props.has('failed:gone')).toBe(false);
+		expect(rt.props.has('nomarker:gone')).toBe(false);
+		expect(rt.props.get('failed:d1')).toBe('y');
+	});
+
+	it('round 2 #9: the no-send-time alert fires once per draft, not once per Gmail autosave', () => {
+		rt.add('d1', msg(undefined, 'Edited'));
+		rt.run();
+		rt.drafts.get('d1')!.messageId = 'autosaved-1';
+		rt.props.set('lastFullScan', String(Date.now()));
+		rt.run();
+		expect(rt.alerts).toHaveLength(1);
 	});
 
 	it('reports a send interrupted part-way', () => {

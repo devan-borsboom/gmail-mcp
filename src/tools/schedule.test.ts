@@ -234,12 +234,10 @@ describe('attack round 1 fixes', () => {
 	});
 	const putRaw = () => decode(((calls().find(([m]) => m === 'PUT')![3]) as {message: {raw: string}}).message.raw);
 
-	it('finding 1: draft_update keeps the send time and the label on a scheduled draft', async () => {
-		const marker = dueIn(120);
-		routeApi(routes(scheduled(marker)));
-		await tools.get('draft_update')!({draftId: 'd1', body: 'new wording'});
-		expect(putRaw()).toMatch(new RegExp(`^X-Scheduled-Send: ${new Date(marker).toISOString()}`));
-		expect(calls().some(([m, e, , b]) => m === 'POST' && e === '/users/me/messages/m2/modify' && JSON.stringify(b) === JSON.stringify({addLabelIds: ['Label_9']}))).toBe(true);
+	it('round 2 #1: draft_update refuses a scheduled draft and changes nothing', async () => {
+		routeApi(routes(scheduled(dueIn(120))));
+		await expect(tools.get('draft_update')!({draftId: 'd1', body: 'new wording'})).rejects.toThrow(/This draft is scheduled/);
+		expect(calls().filter(([m]) => m !== 'GET')).toHaveLength(0);
 	});
 
 	it('finding 1: draft_update on a plain draft adds no marker', async () => {
@@ -252,17 +250,23 @@ describe('attack round 1 fixes', () => {
 		['scheduled_update', {draftId: 'd1', sendAt: inMinutes(60)}],
 		['scheduled_cancel', {draftId: 'd1'}],
 		['scheduled_cancel', {draftId: 'd1', delete: true}],
-		['draft_update', {draftId: 'd1', body: 'x'}],
+		['draft_send', {draftId: 'd1'}],
+		['draft_delete', {draftId: 'd1'}],
 	] as const) {
 		it(`finding 2: ${tool} ${JSON.stringify(args)} refuses while the script may be sending, changing nothing`, async () => {
 			routeApi(routes(scheduled(dueIn(-3))));
-			await expect(tools.get(tool)!(args)).rejects.toThrow(/may be sending right now/);
+			await expect(tools.get(tool)!(args)).rejects.toThrow(/may send it at any moment/);
 			expect(calls().filter(([m]) => m !== 'GET')).toHaveLength(0);
 		});
 	}
 
+	it('round 2 #5: still guarded 90 minutes late, since the script sends up to 2 hours late', async () => {
+		routeApi(routes(scheduled(dueIn(-90))));
+		await expect(tools.get('scheduled_cancel')!({draftId: 'd1'})).rejects.toThrow(/may send it at any moment/);
+	});
+
 	it('finding 2: a draft long overdue (script down) can still be cancelled', async () => {
-		routeApi(routes(scheduled(dueIn(-60))));
+		routeApi(routes(scheduled(dueIn(-180))));
 		const res = await tools.get('scheduled_cancel')!({draftId: 'd1'});
 		expect(res.structuredContent.cancelled).toBe(true);
 		expect(putRaw()).not.toContain('X-Scheduled-Send');

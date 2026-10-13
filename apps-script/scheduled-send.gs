@@ -66,6 +66,7 @@ function run_() {
   const drafts = fullScan ? listDrafts_(undefined) : labelled;
   if (fullScan) {
     props.setProperty('lastFullScan', String(now));
+    forgetGoneDrafts_(props, drafts);
   }
   const labelledIds = {};
   labelled.forEach(function (d) { labelledIds[d.id] = true; });
@@ -83,10 +84,10 @@ function run_() {
       // Labelled but no send time: usually the draft was edited in Gmail,
       // which can drop custom headers. It will never send on its own.
       if (labelledIds[d.id]) {
-        alertOnce_(props, 'nomarker:' + d.id + ':' + d.message.id,
-          'Scheduled email lost its send time: ' + subject,
-          'The draft "' + subject + '" still has the ' + LABEL + ' label but no send time, so it will not send. '
-          + 'Ask Claude to reschedule it (scheduled_update), or send it from Gmail.');
+        alertOnce_(props, 'nomarker:' + d.id,
+          'Scheduled email has no send time: ' + subject,
+          'The draft "' + subject + '" has the ' + LABEL + ' label but no send time, so it will not send. '
+          + 'If you cancelled it, ignore this and remove the label. Otherwise ask Claude to reschedule it (scheduled_update), or send it from Gmail.');
       }
       return;
     }
@@ -130,7 +131,8 @@ function sendOne_(props, draftId, marker, subject) {
     props.deleteProperty(inflightKey);
     // A send that went through but whose reply was lost (timeout, server
     // error) leaves no draft behind. Say so, rather than inviting a resend.
-    if (!draftExists_(draftId)) {
+    const exists = draftExists_(draftId);
+    if (exists === false) {
       alert_('Scheduled email probably sent, please check: ' + subject,
         'Sending "' + subject + '" (due ' + marker + ') reported an error, but the draft is gone, so it most likely went out.'
         + '\n\nError: ' + e + '\n\nCheck Sent before sending it again.');
@@ -152,17 +154,33 @@ function sendOne_(props, draftId, marker, subject) {
     }
     alert_('Scheduled email FAILED to send: ' + subject,
       'The scheduled email "' + subject + '" (due ' + marker + ') could not be sent.\n\nError: ' + e
-      + '\n\nIt is still in Drafts. Send it from Gmail, or ask Claude to reschedule it.');
+      + (exists === null
+        ? '\n\nGmail could not be reached to confirm what happened. Check Sent first, then Drafts.'
+        : '\n\nIt is still in Drafts. Send it from Gmail, or ask Claude to reschedule it.'));
   }
 }
 
+// true = still there, false = Gmail says it is gone, null = could not tell.
 function draftExists_(draftId) {
   try {
     Gmail.Users.Drafts.get('me', draftId, {format: 'minimal'});
     return true;
   } catch (e) {
-    return false;
+    return /not found|404/i.test(String(e)) ? false : null;
   }
+}
+
+// Drop failed:/nomarker: notes for drafts that no longer exist, so the store
+// does not grow forever.
+function forgetGoneDrafts_(props, drafts) {
+  const live = {};
+  drafts.forEach(function (d) { live[d.id] = true; });
+  Object.keys(props.getProperties()).forEach(function (key) {
+    const m = /^(failed|nomarker):(.+)$/.exec(key);
+    if (m && !live[m[2]]) {
+      props.deleteProperty(key);
+    }
+  });
 }
 
 function checkInflight_(props, now) {

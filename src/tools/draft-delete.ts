@@ -4,6 +4,9 @@ import type {Config} from './types.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
 import {jsonResult} from '../utils/response.js';
 import {strictSchemaWithAliases} from '../utils/schema.js';
+import {
+	assertNotSending, decodeRaw, getRawDraft, markerOf,
+} from '../utils/schedule.js';
 
 const inputSchema = strictSchemaWithAliases({
 	draftId: z.string().describe('The ID of the draft to delete'),
@@ -24,6 +27,8 @@ export function registerDraftDelete(server: McpServer, config: Config): void {
 			outputSchema,
 		},
 		async ({draftId}) => {
+			// A scheduled draft the script may be sending right now is left alone.
+			assertNotSending(markerOf(decodeRaw((await getRawDraft(config.token, draftId)).message.raw)));
 			await makeGmailApiCall('DELETE', `/users/me/drafts/${draftId}`, config.token);
 			return jsonResult({success: true as const, draftId});
 		},

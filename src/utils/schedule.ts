@@ -140,9 +140,10 @@ export async function findScheduleLabel(token: string): Promise<string | undefin
 	return listed.labels?.find((l) => l.name === SCHEDULE_LABEL)?.id;
 }
 
-// The Apps Script sends a due draft within about 5 minutes. Touching a draft in
+// The Apps Script may send a due draft any time until it is 2 hours late
+// (MAX_LATE_MINUTES in the script), plus one run of slack. Touching a draft in
 // that window races it: the edit can land between its strip and its send.
-export const SENDING_WINDOW_MS = 10 * 60 * 1000;
+export const SENDING_WINDOW_MS = 130 * 60 * 1000;
 
 type RawDraft = {id: string; message: {id: string; threadId: string; raw: string}};
 
@@ -168,7 +169,7 @@ export function assertNotSending(when: Date | undefined, now: number = Date.now(
 
 	const overdue = now - when.getTime();
 	if (overdue >= 0 && overdue < SENDING_WINDOW_MS) {
-		throw new Error(`This email was due at ${mountainTime(when)} and may be sending right now. Wait ${Math.ceil((SENDING_WINDOW_MS - overdue) / 60000)} minutes, then check Sent before changing it.`);
+		throw new Error(`This email was due at ${mountainTime(when)}, so the Apps Script may send it at any moment. Check Sent first. If it is still in Drafts, the script is likely down: delete or send the draft in Gmail itself, or wait ${Math.ceil((SENDING_WINDOW_MS - overdue) / 60000)} minutes and try again.`);
 	}
 }
 

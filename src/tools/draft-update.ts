@@ -7,10 +7,7 @@ import {strictSchemaWithAliases} from '../utils/schema.js';
 import {
 	appendMimeBody, attachmentSchema, resolveAttachment, safeHeaderString,
 } from '../utils/mime.js';
-import {
-	assertNotSending, decodeRaw, getRawDraft, markerOf, scheduleHeaderLine,
-} from '../utils/schedule.js';
-import {setLabel} from './scheduled.js';
+import {decodeRaw, getRawDraft, markerOf} from '../utils/schedule.js';
 
 const inputSchema = strictSchemaWithAliases({
 	draftId: z.string().describe('The ID of the draft to update'),
@@ -44,14 +41,15 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 		async ({draftId, to, subject, body, isHtml, cc, bcc, from, attachments}) => {
 			const resolvedAttachments = attachments?.map(resolveAttachment);
 
-			// A scheduled draft keeps its send time through an edit: this tool
-			// rebuilds the whole message, which would otherwise drop the marker
-			// and leave an email that silently never sends.
-			const marker = markerOf(decodeRaw((await getRawDraft(config.token, draftId)).message.raw));
-			assertNotSending(marker);
+			// This tool rebuilds the whole message from the fields passed, dropping
+			// any not given (cc, from alias, reply headers, thread, attachments).
+			// On a scheduled draft that would send altered content unattended, or,
+			// without the marker, silently never send. So refuse.
+			if (markerOf(decodeRaw((await getRawDraft(config.token, draftId)).message.raw))) {
+				throw new Error('This draft is scheduled. To change it, cancel it with scheduled_cancel (delete: true) and schedule the new version with draft_schedule; to change only the time, use scheduled_update.');
+			}
 
 			const lines = [
-				...(marker ? [scheduleHeaderLine(marker)] : []),
 				...(from ? [`From: ${from}`] : []),
 				...(to ? [`To: ${to}`] : []),
 				...(subject ? [`Subject: ${subject}`] : []),
@@ -67,12 +65,7 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 			const result = await makeGmailApiCall('PUT', `/users/me/drafts/${draftId}`, config.token, {
 				message: {raw: encodedEmail},
 			});
-			const parsed = outputSchema.parse(result);
-			if (marker && parsed.message) {
-				await setLabel(config.token, parsed.message.id, true);
-			}
-
-			return jsonResult(parsed);
+			return jsonResult(outputSchema.parse(result));
 		},
 	);
 }
