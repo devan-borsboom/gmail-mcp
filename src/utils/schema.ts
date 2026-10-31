@@ -1,41 +1,26 @@
-import {z, type ZodRawShape, type ZodTypeAny} from 'zod';
+import {z, type ZodRawShape} from 'zod';
 
 type AliasMap = Record<string, string>;
 
 /**
- * Creates a strict Zod object schema that:
- * 1. Accepts aliased parameter names (e.g., new_string -> new_str)
- * 2. Rejects any unknown parameters after alias resolution
+ * Creates a strict Zod object schema that rejects any unknown parameters.
+ *
+ * Under zod 3 this also accepted aliased parameter names by wrapping the
+ * object in a preprocess step and patching `.shape` onto the wrapper so the
+ * MCP SDK could still find the parameter list. Zod 4 turns preprocess into a
+ * pipe, and the SDK only treats a schema as an object when its own definition
+ * is an object, so that wrapper would make every tool advertise an empty
+ * parameter list. No tool in this server uses an alias, so the schema is now
+ * the plain strict object, and a non-empty alias map fails at startup rather
+ * than silently shipping a tool the client cannot see the parameters of.
  */
 export function strictSchemaWithAliases<T extends ZodRawShape>(
 	shape: T,
 	aliases: AliasMap = {},
-): ZodTypeAny {
-	const objectSchema = z.object(shape).strict();
+) {
+	if (Object.keys(aliases).length > 0) {
+		throw new Error('strictSchemaWithAliases: parameter aliases are not supported under zod 4 (see utils/schema.ts)');
+	}
 
-	const effectsSchema = z.preprocess((args: unknown) => {
-		if (typeof args !== 'object' || args === null) {
-			return args;
-		}
-
-		const input = args as Record<string, unknown>;
-		const result: Record<string, unknown> = {};
-
-		// Build result object, mapping aliases to canonical names
-		for (const key of Object.keys(input)) {
-			const canonicalKey = aliases[key] ?? key;
-			// Only use alias if canonical key isn't already set
-			if (!(canonicalKey in result)) {
-				result[canonicalKey] = input[key];
-			}
-		}
-
-		return result;
-	}, objectSchema);
-
-	// Expose .shape so MCP SDK's normalizeObjectSchema can find the inner schema.
-	// Without this, the SDK falls back to an empty JSON schema for ZodEffects.
-	(effectsSchema as unknown as {shape: T}).shape = objectSchema.shape;
-
-	return effectsSchema;
+	return z.object(shape).strict();
 }

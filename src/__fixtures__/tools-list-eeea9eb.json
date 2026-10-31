@@ -1,0 +1,484 @@
+{
+ "_source": "tools/list captured from the live eeea9eb build (zod 3, SDK 1.30) on 2026-10-31, before the zod 4 / SDK 1.32 upgrade",
+ "tools": {
+  "attachment_get": {
+   "additionalProperties": false,
+   "properties": [
+    "attachmentId",
+    "messageId"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "attachmentId",
+    "messageId"
+   ]
+  },
+  "draft_create": {
+   "additionalProperties": false,
+   "properties": [
+    "attachments",
+    "bcc",
+    "body",
+    "cc",
+    "from",
+    "inReplyTo",
+    "isHtml",
+    "references",
+    "subject",
+    "threadId",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "body",
+    "subject",
+    "to"
+   ]
+  },
+  "draft_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "draftId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "draftId"
+   ]
+  },
+  "draft_get": {
+   "additionalProperties": false,
+   "properties": [
+    "draftId",
+    "format"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "draftId"
+   ]
+  },
+  "draft_schedule": {
+   "additionalProperties": false,
+   "properties": [
+    "attachments",
+    "bcc",
+    "body",
+    "cc",
+    "from",
+    "inReplyTo",
+    "isHtml",
+    "references",
+    "sendAt",
+    "subject",
+    "threadId",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "body",
+    "sendAt",
+    "subject",
+    "to"
+   ]
+  },
+  "draft_send": {
+   "additionalProperties": false,
+   "properties": [
+    "draftId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "draftId"
+   ]
+  },
+  "draft_update": {
+   "additionalProperties": false,
+   "properties": [
+    "attachments",
+    "bcc",
+    "body",
+    "cc",
+    "draftId",
+    "from",
+    "isHtml",
+    "subject",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "draftId"
+   ]
+  },
+  "drafts_list": {
+   "additionalProperties": false,
+   "properties": [
+    "includeSpamTrash",
+    "maxResults",
+    "pageToken",
+    "q"
+   ],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "filter_create": {
+   "additionalProperties": false,
+   "properties": [
+    "addLabelIds",
+    "excludeChats",
+    "forward",
+    "from",
+    "hasAttachment",
+    "negatedQuery",
+    "query",
+    "removeLabelIds",
+    "size",
+    "sizeComparison",
+    "subject",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": []
+  },
+  "filter_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "filterId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "filterId"
+   ]
+  },
+  "filter_get": {
+   "additionalProperties": false,
+   "properties": [
+    "filterId"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "filterId"
+   ]
+  },
+  "filters_list": {
+   "additionalProperties": false,
+   "properties": [],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "get_profile": {
+   "additionalProperties": false,
+   "properties": [],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "label_create": {
+   "additionalProperties": false,
+   "properties": [
+    "backgroundColor",
+    "labelListVisibility",
+    "messageListVisibility",
+    "name",
+    "textColor"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "name"
+   ]
+  },
+  "label_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "labelId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "labelId"
+   ]
+  },
+  "label_get": {
+   "additionalProperties": false,
+   "properties": [
+    "labelId"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "labelId"
+   ]
+  },
+  "label_update": {
+   "additionalProperties": false,
+   "properties": [
+    "backgroundColor",
+    "labelId",
+    "labelListVisibility",
+    "messageListVisibility",
+    "name",
+    "textColor"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "labelId"
+   ]
+  },
+  "labels_list": {
+   "additionalProperties": false,
+   "properties": [],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "message_archive": {
+   "additionalProperties": false,
+   "properties": [
+    "id"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "id"
+   ]
+  },
+  "message_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "messageId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "messageId"
+   ]
+  },
+  "message_forward": {
+   "additionalProperties": false,
+   "properties": [
+    "attachments",
+    "body",
+    "from",
+    "id",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "id",
+    "to"
+   ]
+  },
+  "message_get": {
+   "additionalProperties": false,
+   "properties": [
+    "format",
+    "id",
+    "metadataHeaders"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "id"
+   ]
+  },
+  "message_modify": {
+   "additionalProperties": false,
+   "properties": [
+    "addLabelIds",
+    "id",
+    "removeLabelIds"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "id"
+   ]
+  },
+  "message_send": {
+   "additionalProperties": false,
+   "properties": [
+    "attachments",
+    "bcc",
+    "body",
+    "cc",
+    "from",
+    "inReplyTo",
+    "isHtml",
+    "references",
+    "subject",
+    "threadId",
+    "to"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "body",
+    "subject",
+    "to"
+   ]
+  },
+  "message_trash": {
+   "additionalProperties": false,
+   "properties": [
+    "id"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "id"
+   ]
+  },
+  "message_untrash": {
+   "additionalProperties": false,
+   "properties": [
+    "messageId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "messageId"
+   ]
+  },
+  "messages_batch_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "messageIds"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "messageIds"
+   ]
+  },
+  "messages_batch_modify": {
+   "additionalProperties": false,
+   "properties": [
+    "addLabelIds",
+    "messageIds",
+    "removeLabelIds"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "messageIds"
+   ]
+  },
+  "messages_list": {
+   "additionalProperties": false,
+   "properties": [
+    "includeSpamTrash",
+    "labelIds",
+    "maxResults",
+    "pageToken",
+    "q"
+   ],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "scheduled_cancel": {
+   "additionalProperties": false,
+   "properties": [
+    "delete",
+    "draftId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "draftId"
+   ]
+  },
+  "scheduled_list": {
+   "additionalProperties": false,
+   "properties": [
+    "maxDrafts"
+   ],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "scheduled_update": {
+   "additionalProperties": false,
+   "properties": [
+    "draftId",
+    "sendAt"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "draftId",
+    "sendAt"
+   ]
+  },
+  "thread_delete": {
+   "additionalProperties": false,
+   "properties": [
+    "threadId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "threadId"
+   ]
+  },
+  "thread_get": {
+   "additionalProperties": false,
+   "properties": [
+    "format",
+    "id",
+    "metadataHeaders"
+   ],
+   "readOnlyHint": true,
+   "required": [
+    "id"
+   ]
+  },
+  "thread_modify": {
+   "additionalProperties": false,
+   "properties": [
+    "addLabelIds",
+    "removeLabelIds",
+    "threadId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "threadId"
+   ]
+  },
+  "thread_trash": {
+   "additionalProperties": false,
+   "properties": [
+    "threadId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "threadId"
+   ]
+  },
+  "thread_untrash": {
+   "additionalProperties": false,
+   "properties": [
+    "threadId"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "threadId"
+   ]
+  },
+  "threads_list": {
+   "additionalProperties": false,
+   "properties": [
+    "includeSpamTrash",
+    "labelIds",
+    "maxResults",
+    "pageToken",
+    "q"
+   ],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "vacation_get": {
+   "additionalProperties": false,
+   "properties": [],
+   "readOnlyHint": true,
+   "required": []
+  },
+  "vacation_set": {
+   "additionalProperties": false,
+   "properties": [
+    "enableAutoReply",
+    "endTime",
+    "responseBodyHtml",
+    "responseBodyPlainText",
+    "responseSubject",
+    "restrictToContacts",
+    "restrictToDomain",
+    "startTime"
+   ],
+   "readOnlyHint": null,
+   "required": [
+    "enableAutoReply"
+   ]
+  }
+ }
+}

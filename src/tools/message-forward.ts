@@ -463,8 +463,8 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 				...(from && {from}),
 				...(originalMessageId && {inReplyTo: originalMessageId}),
 				...(originalReferences && {references: originalReferences}),
-				inlineImages: inlineImages.length > 0 ? inlineImages : undefined,
-				attachments: allAttachments.length > 0 ? allAttachments : undefined,
+				...(inlineImages.length > 0 && {inlineImages}),
+				...(allAttachments.length > 0 && {attachments: allAttachments}),
 			});
 
 			// Send with threadId to keep in same thread
