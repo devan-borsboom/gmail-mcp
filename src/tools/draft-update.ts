@@ -27,6 +27,7 @@ const outputSchema = z.object({
 		id: z.string(),
 		threadId: z.string(),
 	}).optional(),
+	senderWarning: z.string().optional(),
 });
 
 /** A header with its folded continuation lines, kept verbatim. */
@@ -101,6 +102,32 @@ function attachmentEntity(att: ResolvedAttachment): string {
 	// appendMimeBody wraps in multipart/mixed; take only the attachment part.
 	const boundary = /boundary="([^"]+)"/.exec(lines[1] ?? '')![1]!;
 	return splitMultipart(lines.join('\r\n'), boundary)[1]!;
+}
+
+const CONSULT_FROM = 'devan@borsboomconsulting.com';
+const CONSULT_MARKER = 'Borsboom Consulting | AI for Professional Practices';
+
+/**
+ * A body-only edit keeps the draft's sender, which the PreToolUse signature
+ * gate cannot see: it reads a consulting marker in the new body as a consulting
+ * draft and anything else as a work draft. Warn when the kept sender says
+ * otherwise, so the gate's guess is never the last word on the identity.
+ */
+export function keptSenderWarning(original: string, body: string): string | undefined {
+	const head = /\r?\n\r?\n/.exec(original);
+	const fromHeader = (headerValue(splitHead(head ? original.slice(0, head.index) : original), 'from') ?? '').toLowerCase();
+	const sender = /<([^>]*)>/.exec(fromHeader)?.[1]?.trim() ?? fromHeader;
+	const consultingSender = sender.includes(CONSULT_FROM);
+	const consultingBody = (body.split('gmail_quote')[0] ?? '').includes(CONSULT_MARKER);
+	if (consultingSender && !consultingBody) {
+		return `This draft keeps its sender ${CONSULT_FROM}, but the new body is not signed with the Borsboom Consulting block, so the signature check read it as a work email. Re-sign it with the consulting block from gmail-send, or pass from: "Devan Borsboom <devan@yeticonnect.com>", before draft_send.`;
+	}
+
+	if (!consultingSender && consultingBody) {
+		return `This draft keeps its sender ${sender || 'the account default'}, but the new body carries the Borsboom Consulting signature. Pass from: "Devan Borsboom <${CONSULT_FROM}>" with draft_update, or re-sign the body, before draft_send.`;
+	}
+
+	return undefined;
 }
 
 /**
@@ -207,7 +234,9 @@ export function registerDraftUpdate(server: McpServer, config: Config): void {
 				id: draftId,
 				message: {raw: encodedEmail, ...(current.message.threadId && {threadId: current.message.threadId})},
 			});
-			return jsonResult(outputSchema.parse(result));
+			const senderWarning = from === undefined && body !== undefined ? keptSenderWarning(original, body) : undefined;
+			const parsed = outputSchema.parse(result);
+			return jsonResult(senderWarning ? {...parsed, senderWarning} : parsed);
 		},
 	);
 }
