@@ -53,6 +53,7 @@ const listOutput = z.object({
 	scannedDrafts: z.number(),
 	overdueCount: z.number(),
 	truncated: z.boolean(),
+	vanishedDrafts: z.number().optional().describe('Drafts that were sent or deleted while the list was being read'),
 });
 
 export function registerScheduledList(server: McpServer, config: Config): void {
@@ -93,12 +94,29 @@ export function registerScheduledList(server: McpServer, config: Config): void {
 			// Ten at a time, so a large Drafts folder does not trip Gmail's rate limit.
 			const withMessage = drafts.filter((d) => d.message?.id);
 			const metas: {draft: DraftRef; meta: MessageMeta}[] = [];
+			// A draft sent or deleted between the list and this fetch answers 404
+			// (the Apps Script sending a due one, for example). Skip it rather than
+			// fail the whole list; any other error still fails the call.
+			let vanishedDrafts = 0;
 			for (let i = 0; i < withMessage.length; i += 10) {
 				// eslint-disable-next-line no-await-in-loop
-				metas.push(...await Promise.all(withMessage.slice(i, i + 10).map(async (d) => ({
-					draft: d,
-					meta: await makeGmailApiCall('GET', `/users/me/messages/${d.message!.id}?${metaParams.toString()}`, config.token) as MessageMeta,
-				}))));
+				const batch = await Promise.all(withMessage.slice(i, i + 10).map(async (d) => {
+					try {
+						return {
+							draft: d,
+							meta: await makeGmailApiCall('GET', `/users/me/messages/${d.message!.id}?${metaParams.toString()}`, config.token) as MessageMeta,
+						};
+					} catch (error) {
+						if (error instanceof Error && error.message.startsWith('Gmail API error: 404 ')) {
+							return undefined;
+						}
+
+						throw error;
+					}
+				}));
+				const found = batch.filter((m) => m !== undefined);
+				vanishedDrafts += batch.length - found.length;
+				metas.push(...found);
 			}
 
 			const scheduled = metas.flatMap(({draft, meta}) => {
@@ -126,6 +144,7 @@ export function registerScheduledList(server: McpServer, config: Config): void {
 				scannedDrafts: drafts.length,
 				overdueCount: scheduled.filter((s) => s.overdue).length,
 				truncated: Boolean(pageToken),
+				...(vanishedDrafts > 0 && {vanishedDrafts}),
 			}));
 		},
 	);

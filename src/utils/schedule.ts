@@ -22,7 +22,7 @@ const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[
 
 export const sendAtSchema = z.string()
 	.regex(ISO_WITH_OFFSET, 'sendAt must be ISO 8601 with a time zone offset, e.g. 2026-10-13T08:00:00-06:00')
-	.describe('When to send, ISO 8601 with a time zone offset, e.g. 2026-10-13T08:00:00-06:00 for 8 AM Mountain Daylight Time. Must be 2 minutes to 365 days from now.');
+	.describe('When to send, ISO 8601 with a time zone offset, e.g. 2026-11-13T08:00:00-06:00 for 8 AM in Alberta, which is UTC-6 year-round from 2026-11-01 (no fall-back to -07:00). Must be 2 minutes to 365 days from now.');
 
 /** Parse and range-check a sendAt value. Returns the instant as a Date. */
 export function parseSendAt(value: string, now: Date = new Date()): Date {
@@ -51,10 +51,16 @@ export function parseSendAt(value: string, now: Date = new Date()): Date {
 	return when;
 }
 
+// Alberta stays on UTC-6 year-round from 2026-11-01 02:00 local (08:00 UTC):
+// no fall-back hour. Node's bundled time zone data predates that law and would
+// show an hour early, so instants from then on are read at a fixed UTC-6.
+export const ALBERTA_FIXED_UTC6_FROM_MS = Date.UTC(2026, 10, 1, 8);
+
 /** Devan's local reading of an instant, so a wrong offset is visible before it is approved. */
 export function mountainTime(when: Date): string {
+	const fixed = when.getTime() >= ALBERTA_FIXED_UTC6_FROM_MS;
 	return when.toLocaleString('en-US', {
-		timeZone: 'America/Edmonton', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+		timeZone: fixed ? 'Etc/GMT+6' : 'America/Edmonton', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
 	});
 }
 

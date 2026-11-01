@@ -3,7 +3,9 @@ import {
 } from 'vitest';
 import {type McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {makeGmailApiCall} from '../utils/gmail-api.js';
-import {parseSendAt, setScheduleMarker, readScheduleMarker} from '../utils/schedule.js';
+import {
+	mountainTime, parseSendAt, setScheduleMarker, readScheduleMarker,
+} from '../utils/schedule.js';
 import {registerAll} from './index.js';
 import type {Config} from './types.js';
 
@@ -293,6 +295,124 @@ describe('attack round 1 fixes', () => {
 			'POST /users/me/messages/m1/modify': () => ({}),
 		});
 		const res = await tools.get('draft_schedule')!({to: 'a@example.com', subject: 'Hi', body: 'b', sendAt: '2027-01-12T08:00:00-06:00'});
-		expect(res.structuredContent.sendAtLocal).toMatch(/Jan 12.*7:00\sAM MST/);
+		// Alberta is UTC-6 year-round from 2026-11-01, so 08:00-06:00 is 8 AM local.
+		expect(res.structuredContent.sendAtLocal).toMatch(/Jan 12.*8:00\sAM/);
+	});
+});
+
+describe('audit 2026-11-01 fixes', () => {
+	const dueIn = (min: number) => new Date(Date.now() + (min * 60_000)).toISOString();
+	const scheduled = (marker: string) => `X-Scheduled-Send: ${marker}\r\nTo: a@example.com\r\nSubject: hi\r\n\r\nbody`;
+	const putRaws = () => calls().filter(([m]) => m === 'PUT').map(([, , , b]) => decode((b as {message: {raw: string}}).message.raw));
+
+	it('draft_send: a rejected send puts the schedule marker back, so the draft stays scheduled', async () => {
+		const marker = dueIn(120);
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(scheduled(marker))}}),
+			'PUT /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm2', threadId: 't1'}}),
+			'POST /users/me/drafts/send'() {
+				throw new Error('Gmail API error: 429 Too Many Requests - quota');
+			},
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/still scheduled/);
+		const raws = putRaws();
+		expect(raws, 'strip then restore').toHaveLength(2);
+		expect(raws[0], 'first PUT strips the marker').not.toContain('X-Scheduled-Send');
+		expect(raws[1], 'second PUT restores the original time').toContain(`X-Scheduled-Send: ${new Date(marker).toISOString()}`);
+		expect(raws[1], 'restored draft keeps its body').toContain('body');
+	});
+
+	it('draft_send: a send that timed out is not re-scheduled (it may have gone), and says the draft is unscheduled', async () => {
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(scheduled(dueIn(120)))}}),
+			'PUT /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm2', threadId: 't1'}}),
+			'POST /users/me/drafts/send'() {
+				throw new Error('Gmail API request timed out after 60s (POST /users/me/drafts/send). It may still have gone through: check Gmail (Sent or Drafts) before retrying.');
+			},
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/no longer scheduled/);
+		expect(putRaws(), 'only the strip, no restore').toHaveLength(1);
+	});
+
+	it('draft_send: if the restore itself fails, the error says the draft is no longer scheduled', async () => {
+		let puts = 0;
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(scheduled(dueIn(120)))}}),
+			'PUT /users/me/drafts/d1'() {
+				puts += 1;
+				if (puts > 1) {
+					throw new Error('Gmail API error: 404 Not Found - gone');
+				}
+
+				return {id: 'd1', message: {id: 'm2', threadId: 't1'}};
+			},
+			'POST /users/me/drafts/send'() {
+				throw new Error('Gmail API error: 500 Internal Server Error - x');
+			},
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/no longer scheduled/);
+	});
+
+	it('draft_send: a plain draft whose send fails is never given a marker', async () => {
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode('To: a@example.com\r\n\r\nbody')}}),
+			'POST /users/me/drafts/send'() {
+				throw new Error('Gmail API error: 500 Internal Server Error - x');
+			},
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/Gmail API error: 500/);
+		expect(putRaws()).toHaveLength(0);
+	});
+
+	const meta = (id: string, marker?: string) => ({
+		id, threadId: `t${id}`, payload: {
+			headers: [
+				{name: 'To', value: 'a@example.com'},
+				{name: 'Subject', value: `s${id}`},
+				...(marker ? [{name: 'X-Scheduled-Send', value: marker}] : []),
+			],
+		},
+	});
+	const threeDrafts = () => ({
+		drafts: [
+			{id: 'd1', message: {id: 'm1', threadId: 't'}},
+			{id: 'd2', message: {id: 'm2', threadId: 't'}},
+			{id: 'd3', message: {id: 'm3', threadId: 't'}},
+		],
+	});
+
+	it('scheduled_list: a draft that vanishes mid-scan (404) is skipped, not fatal', async () => {
+		routeApi({
+			'GET /users/me/drafts': threeDrafts,
+			'GET /users/me/messages/m1': () => meta('m1', dueIn(5)),
+			'GET /users/me/messages/m2'() {
+				throw new Error('Gmail API error: 404 Not Found - Requested entity was not found.');
+			},
+			'GET /users/me/messages/m3': () => meta('m3', dueIn(10)),
+		});
+		const res = await tools.get('scheduled_list')!({maxDrafts: 200});
+		expect((res.structuredContent.scheduled as {draftId: string}[]).map((s) => s.draftId)).toEqual(['d1', 'd3']);
+		expect(res.structuredContent.vanishedDrafts, 'vanished count reported').toBe(1);
+	});
+
+	it('scheduled_list: any other error on one draft still fails the call', async () => {
+		routeApi({
+			'GET /users/me/drafts': threeDrafts,
+			'GET /users/me/messages/m1': () => meta('m1', dueIn(5)),
+			'GET /users/me/messages/m2'() {
+				throw new Error('Gmail API error: 500 Internal Server Error - x');
+			},
+			'GET /users/me/messages/m3': () => meta('m3', dueIn(10)),
+		});
+		await expect(tools.get('scheduled_list')!({maxDrafts: 200})).rejects.toThrow(/500/);
+	});
+
+	it('mountainTime: Alberta stays UTC-6 from 2026-11-01 02:00, with no fall-back hour', () => {
+		expect(mountainTime(new Date('2026-10-15T15:00:00Z')), 'summer, before the change').toMatch(/9:00\sAM MDT/);
+		expect(mountainTime(new Date('2026-11-01T07:59:00Z')), 'last minute of daylight time').toMatch(/1:59\sAM MDT/);
+		expect(mountainTime(new Date('2026-11-01T08:00:00Z')), 'the change itself').toMatch(/2:00\sAM/);
+		expect(mountainTime(new Date('2026-11-15T15:00:00Z')), 'November').toMatch(/9:00\sAM/);
+		expect(mountainTime(new Date('2027-01-12T14:00:00Z')), 'January').toMatch(/Jan 12.*8:00\sAM/);
+		expect(mountainTime(new Date('2027-07-12T14:00:00Z')), 'next summer').toMatch(/8:00\sAM/);
 	});
 });
