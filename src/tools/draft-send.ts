@@ -42,6 +42,22 @@ async function restoreAfterFailedSend(token: string, draft: RawDraft, marker: Da
 	return `${reason}\nThe schedule marker was already removed, so if this draft is still in Drafts it is no longer scheduled. Check Sent first; if it did not go, send or reschedule it.`;
 }
 
+/**
+ * The strip failed, so the send was never attempted. A timeout or 5xx may
+ * still have applied the strip, which would leave a plain draft the Apps Script
+ * never sends, so write the marker back: nothing went out, so this cannot send twice.
+ */
+async function restoreAfterFailedStrip(token: string, draft: RawDraft, marker: Date, error: unknown): Promise<string> {
+	const reason = error instanceof Error ? error.message : String(error);
+	try {
+		const {messageId} = await rewriteMarker(token, draft, marker);
+		await setLabel(token, messageId, true); // best effort; the header is what the script reads
+		return `${reason}\nThe email was not sent. It is still scheduled for ${mountainTime(marker)}.`;
+	} catch (restoreError) {
+		return `${reason}\nThe email was not sent, and the schedule could not be confirmed (${restoreError instanceof Error ? restoreError.message : String(restoreError)}), so the draft may no longer be scheduled. Check Drafts and reschedule it with draft_schedule or scheduled_update.`;
+	}
+}
+
 export function registerDraftSend(server: McpServer, config: Config): void {
 	server.registerTool(
 		'draft_send',
@@ -58,7 +74,11 @@ export function registerDraftSend(server: McpServer, config: Config): void {
 			const marker = markerOf(decodeRaw(draft.message.raw));
 			if (marker) {
 				assertNotSending(marker);
-				await rewriteMarker(config.token, draft, undefined);
+				try {
+					await rewriteMarker(config.token, draft, undefined);
+				} catch (error) {
+					throw new Error(await restoreAfterFailedStrip(config.token, draft, marker, error));
+				}
 			}
 
 			let result: unknown;

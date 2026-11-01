@@ -353,6 +353,42 @@ describe('audit 2026-11-01 fixes', () => {
 		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/no longer scheduled/);
 	});
 
+	it('draft_send: a strip that times out (maybe applied) puts the marker back and never sends', async () => {
+		const marker = dueIn(180);
+		let puts = 0;
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(scheduled(marker))}}),
+			'PUT /users/me/drafts/d1'() {
+				puts += 1;
+				if (puts === 1) {
+					throw new Error('Gmail API request timed out after 120s (PUT /users/me/drafts/d1). It may still have gone through: check Gmail (Sent or Drafts) before retrying.');
+				}
+
+				return {id: 'd1', message: {id: 'm3', threadId: 't1'}};
+			},
+			'GET /users/me/labels': () => ({labels: [{id: 'Label_9', name: 'Scheduled-Send'}]}),
+			'POST /users/me/messages/m3/modify': () => ({}),
+			'POST /users/me/drafts/send': () => ({id: 'm9', threadId: 't1'}),
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/not sent.*still scheduled/s);
+		const raws = putRaws();
+		expect(raws, 'strip then restore').toHaveLength(2);
+		expect(raws[1], 'second PUT restores the original time').toContain(`X-Scheduled-Send: ${new Date(marker).toISOString()}`);
+		expect(calls().some(([m, e]) => m === 'POST' && e === '/users/me/drafts/send'), 'no send after a failed strip').toBe(false);
+	});
+
+	it('draft_send: a strip that 5xx-fails and cannot be restored says the schedule may be lost', async () => {
+		routeApi({
+			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode(scheduled(dueIn(180)))}}),
+			'PUT /users/me/drafts/d1'() {
+				throw new Error('Gmail API error: 503 Service Unavailable - x');
+			},
+			'POST /users/me/drafts/send': () => ({id: 'm9', threadId: 't1'}),
+		});
+		await expect(tools.get('draft_send')!({draftId: 'd1'})).rejects.toThrow(/not sent.*may no longer be scheduled.*reschedule/s);
+		expect(calls().some(([m, e]) => m === 'POST' && e === '/users/me/drafts/send'), 'no send after a failed strip').toBe(false);
+	});
+
 	it('draft_send: a plain draft whose send fails is never given a marker', async () => {
 		routeApi({
 			'GET /users/me/drafts/d1': () => ({id: 'd1', message: {id: 'm1', threadId: 't1', raw: encode('To: a@example.com\r\n\r\nbody')}}),
