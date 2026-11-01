@@ -21,19 +21,9 @@ function tooLargeMessage(bytes: number, limit: number): string {
 		+ 'Pass large attachments as {path} instead of base64 content.';
 }
 
-/**
- * The JSON-RPC id from the end of a request body. The MCP SDK writes `id` as
- * the last key of every request, so it sits at the very end even when the
- * body is too big to read whole. Anything else gives null.
- */
-export function idFromTail(tail: string): string | number | null {
-	const m = /"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.)*")\s*\}\s*$/.exec(tail);
-	if (!m?.[1]) {
-		return null;
-	}
-
+function parseId(raw: string): string | number | null {
 	try {
-		const id: unknown = JSON.parse(m[1]);
+		const id: unknown = JSON.parse(raw);
 		return typeof id === 'string' || typeof id === 'number' ? id : null;
 	} catch {
 		return null;
@@ -41,9 +31,114 @@ export function idFromTail(tail: string): string | number | null {
 }
 
 /**
+ * The JSON-RPC id from the end of a request body. The MCP SDK writes `id` as
+ * the last key of every request, so it sits at the very end even when the
+ * body is too big to read whole. Anything else gives null.
+ */
+export function idFromTail(tail: string): string | number | null {
+	const m = /"id"\s*:\s*(-?\d+|"(?:[^"\\]|\\.)*")\s*\}\s*$/.exec(tail);
+	return m?.[1] ? parseId(m[1]) : null;
+}
+
+const STRING = /"(?:[^"\\]|\\.)*"/y;
+const ID_VALUE = /-?\d+|"(?:[^"\\]|\\.)*"/y;
+const PRIMITIVE = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/y;
+
+function matchAt(re: RegExp, text: string, at: number): string | undefined {
+	re.lastIndex = at;
+	return re.exec(text)?.[0];
+}
+
+function skipSpace(text: string, at: number): number {
+	let i = at;
+	while (i < text.length && /\s/.test(text[i]!)) {
+		i += 1;
+	}
+
+	return i;
+}
+
+/** Index just past the JSON value starting at `at`, or -1 when the text stops first. */
+function valueEnd(text: string, at: number): number {
+	const first = text[at];
+	if (first !== '{' && first !== '[') {
+		const token = matchAt(first === '"' ? STRING : PRIMITIVE, text, at);
+		return token === undefined ? -1 : at + token.length;
+	}
+
+	let depth = 0;
+	for (let i = at; i < text.length; i += 1) {
+		const c = text[i];
+		if (c === '"') {
+			const s = matchAt(STRING, text, i);
+			if (s === undefined) {
+				return -1;
+			}
+
+			i += s.length - 1;
+		} else if (c === '{' || c === '[') {
+			depth += 1;
+		} else if (c === '}' || c === ']') {
+			depth -= 1;
+			if (depth === 0) {
+				return i + 1;
+			}
+		}
+	}
+
+	return -1;
+}
+
+/**
+ * The JSON-RPC id from the start of a request body, for a client that writes
+ * `id` before the big params. Walks the top-level keys and returns the id once
+ * its whole value is inside the head; null when the head ends first.
+ */
+export function idFromHead(head: string): string | number | null {
+	let i = skipSpace(head, 0);
+	if (head[i] !== '{') {
+		return null;
+	}
+
+	i += 1;
+	for (;;) {
+		i = skipSpace(head, i);
+		const key = matchAt(STRING, head, i);
+		if (key === undefined) {
+			return null;
+		}
+
+		i = skipSpace(head, i + key.length);
+		if (head[i] !== ':') {
+			return null;
+		}
+
+		i = skipSpace(head, i + 1);
+		if (key === '"id"') {
+			const raw = matchAt(ID_VALUE, head, i);
+			const after = raw === undefined ? -1 : skipSpace(head, i + raw.length);
+			return raw !== undefined && (head[after] === ',' || head[after] === '}') ? parseId(raw) : null;
+		}
+
+		const end = valueEnd(head, i);
+		if (end < 0) {
+			return null;
+		}
+
+		i = skipSpace(head, end);
+		if (head[i] !== ',') {
+			return null;
+		}
+
+		i += 1;
+	}
+}
+
+/**
  * Ahead of express.json: a POST /mcp whose Content-Length is over the limit is
- * read here (keeping only its last few KB) and answered with a JSON-RPC error
- * carrying the request's own id, so the client gets a tool error at once.
+ * read here (keeping only its first and last few KB) and answered with a
+ * JSON-RPC error carrying the request's own id, so the client gets a tool
+ * error at once.
  */
 export function oversizeMcpGuard(limit: number = MCP_BODY_LIMIT_BYTES) {
 	return (req: Request, res: Response, next: NextFunction): void => {
@@ -53,10 +148,15 @@ export function oversizeMcpGuard(limit: number = MCP_BODY_LIMIT_BYTES) {
 			return;
 		}
 
+		let head = Buffer.alloc(0);
 		let tail = Buffer.alloc(0);
 		let seen = 0;
 		req.on('data', (chunk: Buffer) => {
 			seen += chunk.length;
+			if (head.length < TAIL_BYTES) {
+				head = Buffer.concat([head, chunk.subarray(0, TAIL_BYTES - head.length)]);
+			}
+
 			tail = Buffer.concat([tail, chunk]);
 			if (tail.length > TAIL_BYTES) {
 				tail = tail.subarray(tail.length - TAIL_BYTES);
@@ -66,7 +166,7 @@ export function oversizeMcpGuard(limit: number = MCP_BODY_LIMIT_BYTES) {
 			res.status(200).json({
 				jsonrpc: '2.0',
 				error: {code: -32600, message: tooLargeMessage(Math.max(seen, length), limit)},
-				id: idFromTail(tail.toString('utf8')),
+				id: idFromHead(head.toString('utf8')) ?? idFromTail(tail.toString('utf8')),
 			});
 		});
 		req.on('error', () => {
