@@ -8,6 +8,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import {mcpAuthFailure, proxyTokenRequest} from './utils/auth-gate.js';
 import {createLoopbackGate} from './utils/loopback.js';
+import {MCP_BODY_LIMIT_BYTES, bodyErrorHandler, oversizeMcpGuard} from './utils/body-limit.js';
 
 // Google OAuth configuration - users must provide their own credentials
 const {GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET} = process.env;
@@ -93,7 +94,10 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			next();
 		});
 
-		app.use(express.json({limit: '20mb'}));
+		// An oversized /mcp body is answered in JSON-RPC before express.json would
+		// reject it with an HTML page the client never answers (utils/body-limit.ts).
+		app.use(oversizeMcpGuard());
+		app.use(express.json({limit: MCP_BODY_LIMIT_BYTES}));
 		app.use(express.urlencoded({extended: true}));
 
 		const port = parseInt(process.env.PORT || '3000', 10);
@@ -303,6 +307,9 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 				}
 			}
 		});
+
+		// Body-parser errors (bad JSON, too many form fields) as JSON, not HTML.
+		app.use(bodyErrorHandler());
 
 		const httpServer = app.listen(port, '127.0.0.1', () => {
 			console.error(`Gmail MCP server running on ${baseUrl}/mcp (bound to 127.0.0.1)`);
