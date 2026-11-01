@@ -69,6 +69,7 @@ type InlineImage = {
 	mimeType: string;
 	contentId: string;
 	attachmentId: string;
+	filename?: string;
 };
 
 /**
@@ -165,6 +166,7 @@ function findInlineImages(parts: Part[] | undefined): InlineImage[] {
 				mimeType: part.mimeType,
 				contentId, // e.g., "<image.png>"
 				attachmentId: part.body.attachmentId,
+				...(part.filename && {filename: part.filename}),
 			});
 		}
 
@@ -181,11 +183,19 @@ function findInlineImages(parts: Part[] | undefined): InlineImage[] {
  */
 function extractBody(payload: z.infer<typeof messageSchema>['payload']): {content: string; isHtml: boolean} {
 	if (payload.body?.data) {
-		return {content: decodeBase64Url(payload.body.data), isHtml: false};
+		// A single-part message (common for invoices and notifications) may be HTML.
+		return {content: decodeBase64Url(payload.body.data), isHtml: payload.mimeType?.toLowerCase().startsWith('text/html') ?? false};
 	}
 
 	if (!payload.parts) {
 		return {content: '', isHtml: false};
+	}
+
+	// HTML first: it is what the sender wrote, and the only body that can show
+	// the inline images forwarded alongside it.
+	const htmlText = findTextContent(payload.parts, 'text/html');
+	if (htmlText) {
+		return {content: htmlText, isHtml: true};
 	}
 
 	const plainText = findTextContent(payload.parts, 'text/plain');
@@ -193,12 +203,16 @@ function extractBody(payload: z.infer<typeof messageSchema>['payload']): {conten
 		return {content: plainText, isHtml: false};
 	}
 
-	const htmlText = findTextContent(payload.parts, 'text/html');
-	if (htmlText) {
-		return {content: htmlText, isHtml: true};
-	}
-
 	return {content: '', isHtml: false};
+}
+
+/**
+ * Escape text for HTML. The forward header quotes a stranger's From, To and
+ * Subject, where `<jane@example.com>` would otherwise vanish as an unknown tag
+ * and any markup would land in the forward.
+ */
+function escapeHtml(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 /**
@@ -403,6 +417,8 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 					return {
 						mimeType: img.mimeType,
 						contentId: img.contentId,
+						// Stranger-written, and it lands in a header: no newlines or quotes.
+						filename: stripNewlines(img.filename ?? img.contentId).replace(/[<>"]/g, ''),
 						data: base64UrlToBase64(data.data),
 					};
 				})),
@@ -418,13 +434,13 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 			if (isHtml) {
 				const htmlHeader = `
 <div style="margin-bottom: 20px;">
-${userMessage ? `<p>${userMessage.replace(/\n/g, '<br>')}</p><br>` : ''}
+${userMessage ? `<p>${escapeHtml(userMessage).replace(/\n/g, '<br>')}</p><br>` : ''}
 <div style="color: #666; border-left: 1px solid #ccc; padding-left: 10px;">
 <p>---------- Forwarded message ---------<br>
-From: ${originalFrom}<br>
-Date: ${originalDate}<br>
-Subject: ${originalSubject}<br>
-To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
+From: ${escapeHtml(originalFrom)}<br>
+Date: ${escapeHtml(originalDate)}<br>
+Subject: ${escapeHtml(originalSubject)}<br>
+To: ${escapeHtml(originalTo)}${originalCc ? `<br>Cc: ${escapeHtml(originalCc)}` : ''}</p>
 </div>
 </div>
 `;
@@ -452,7 +468,12 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 				data: a.content,
 			})) ?? [];
 
-			const allAttachments = [...attachments, ...userAttachmentParts];
+			// A plain-text body cannot show inline images, so carry them as
+			// ordinary attachments rather than dropping them.
+			const inlineAsAttachments = isHtml
+				? []
+				: inlineImages.map((img) => ({filename: img.filename, mimeType: img.mimeType, data: img.data}));
+			const allAttachments = [...attachments, ...inlineAsAttachments, ...userAttachmentParts];
 
 			// Create the message
 			const raw = createRawMessage({
@@ -463,7 +484,7 @@ To: ${originalTo}${originalCc ? `<br>Cc: ${originalCc}` : ''}</p>
 				...(from && {from}),
 				...(originalMessageId && {inReplyTo: originalMessageId}),
 				...(originalReferences && {references: originalReferences}),
-				...(inlineImages.length > 0 && {inlineImages}),
+				...(isHtml && inlineImages.length > 0 && {inlineImages}),
 				...(allAttachments.length > 0 && {attachments: allAttachments}),
 			});
 

@@ -13,6 +13,8 @@
  * See: https://github.com/modelcontextprotocol/typescript-sdk/issues/1294
  */
 
+import {GOOGLE_TIMEOUTS} from './timeouts.js';
+
 const TOKEN_CACHE_MAX_SIZE = 100;
 const TOKEN_CACHE_EXPIRED_BUFFER_MS = 5 * 60 * 1000; // Keep expired tokens cached for 5 min
 
@@ -62,12 +64,13 @@ export async function checkToken(token: string): Promise<TokenStatus> {
 	// Cache miss - call tokeninfo
 	let response: globalThis.Response;
 	try {
-		response = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+		response = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`, {signal: AbortSignal.timeout(GOOGLE_TIMEOUTS.tokenMs)});
 	} catch {
 		return 'unreachable';
 	}
 
-	if (response.status >= 500) {
+	// A 429 (rate limited) says nothing about the token either, same as a 5xx.
+	if (response.status >= 500 || response.status === 429) {
 		return 'unreachable';
 	}
 

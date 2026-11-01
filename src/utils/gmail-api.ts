@@ -1,4 +1,5 @@
 // Gmail API configuration and utilities
+import {GOOGLE_TIMEOUTS} from './timeouts.js';
 
 export const GMAIL_API_BASE_URL = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -64,6 +65,22 @@ export async function makeGmailApiCall(
 		fetchOptions.body = JSON.stringify(body);
 	}
 
-	const response = await fetch(url, fetchOptions);
+	const isRead = method === 'GET';
+	const timeoutMs = isRead ? GOOGLE_TIMEOUTS.gmailReadMs : GOOGLE_TIMEOUTS.gmailWriteMs;
+	fetchOptions.signal = AbortSignal.timeout(timeoutMs);
+
+	let response: Response;
+	try {
+		response = await fetch(url, fetchOptions);
+	} catch (error) {
+		if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+			// A write that timed out may still have reached Gmail, so say so
+			// rather than inviting a blind retry that could send twice.
+			throw new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)}s (${method} ${endpoint.split('?')[0]}).${isRead ? '' : ' It may still have gone through: check Gmail (Sent or Drafts) before retrying.'}`);
+		}
+
+		throw error;
+	}
+
 	return parseResponse(response);
 }

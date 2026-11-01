@@ -1,4 +1,5 @@
 import {checkToken} from './token-cache.js';
+import {GOOGLE_TIMEOUTS} from './timeouts.js';
 
 /**
  * HTTP answers for the two places this server talks to Google on a client's
@@ -43,6 +44,7 @@ export async function proxyTokenRequest(endpoint: string, form: URLSearchParams)
 			method: 'POST',
 			headers: {'Content-Type': 'application/x-www-form-urlencoded'},
 			body: form.toString(),
+			signal: AbortSignal.timeout(GOOGLE_TIMEOUTS.tokenMs),
 		});
 	} catch (error) {
 		console.error('Token exchange error:', error);
