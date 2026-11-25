@@ -42,6 +42,70 @@ async function parseResponse(response: Response): Promise<unknown> {
 	return (await response.text()) || 'Success';
 }
 
+/**
+ * Google slows a project down by answering 429, or 403 with a rate-limit
+ * reason, before it does any work. From Feb 1, 2027 Google holds AI agents
+ * that call the REST API to its Standard tier quota, so this happens more.
+ * A rejected request did nothing, so it is safe to wait and try again, for
+ * writes as well as reads: Google's own guidance is exponential backoff.
+ * Mutable only so tests can shorten the waits.
+ */
+export const GMAIL_RETRY = {
+	maxAttempts: 5,
+	baseDelayMs: 1000,
+	maxDelayMs: 16_000,
+	// Wall-clock limit for one call, retries and their waits included.
+	budgetMs: 30_000,
+};
+
+const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded']);
+
+function isRateLimited(status: number, bodyText: string): boolean {
+	if (status === 429) {
+		return true;
+	}
+
+	if (status !== 403) {
+		return false;
+	}
+
+	try {
+		const parsed = JSON.parse(bodyText) as {error?: {errors?: {reason?: string}[]; status?: string; details?: {reason?: string}[]}};
+		const reasons = [
+			...(parsed.error?.errors ?? []).map((e) => e.reason),
+			...(parsed.error?.details ?? []).map((d) => d.reason),
+		];
+		return reasons.some((r) => typeof r === 'string' && (RATE_LIMIT_REASONS.has(r) || r === 'RATE_LIMIT_EXCEEDED'));
+	} catch {
+		return false;
+	}
+}
+
+// Retry-After in seconds or as an HTTP date; undefined when absent or unusable.
+function retryAfterMs(response: Response): number | undefined {
+	const raw = response.headers?.get?.('retry-after');
+	if (!raw) {
+		return undefined;
+	}
+
+	const seconds = Number(raw);
+	if (Number.isFinite(seconds)) {
+		// A negative number is garbage, not a date: never hand it to Date.parse.
+		return seconds >= 0 ? seconds * 1000 : undefined;
+	}
+
+	const when = Date.parse(raw);
+	if (Number.isFinite(when)) {
+		return Math.max(0, when - Date.now());
+	}
+
+	return undefined;
+}
+
+const sleep = async (ms: number) => new Promise<void>((resolve) => {
+	setTimeout(resolve, ms);
+});
+
 // Utility function to make authenticated API calls
 export async function makeGmailApiCall(
 	method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
@@ -56,31 +120,64 @@ export async function makeGmailApiCall(
 		headers['Content-Type'] = 'application/json';
 	}
 
-	const fetchOptions: RequestInit = {
-		method,
-		headers,
-	};
-
-	if (body) {
-		fetchOptions.body = JSON.stringify(body);
-	}
-
 	const isRead = method === 'GET';
 	const timeoutMs = isRead ? GOOGLE_TIMEOUTS.gmailReadMs : GOOGLE_TIMEOUTS.gmailWriteMs;
-	fetchOptions.signal = AbortSignal.timeout(timeoutMs);
+	const serialized = body ? JSON.stringify(body) : undefined;
 
-	let response: Response;
-	try {
-		response = await fetch(url, fetchOptions);
-	} catch (error) {
-		if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-			// A write that timed out may still have reached Gmail, so say so
-			// rather than inviting a blind retry that could send twice.
-			throw new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)}s (${method} ${endpoint.split('?')[0]}).${isRead ? '' : ' It may still have gone through: check Gmail (Sent or Drafts) before retrying.'}`);
+	const startedAt = Date.now();
+	for (let attempt = 1; ; attempt++) {
+		const fetchOptions: RequestInit = {
+			method,
+			headers,
+			// A fresh timeout per attempt: one shared signal would already be spent.
+			signal: AbortSignal.timeout(timeoutMs),
+		};
+
+		if (serialized !== undefined) {
+			fetchOptions.body = serialized;
 		}
 
-		throw error;
-	}
+		let response: Response;
+		try {
+			// eslint-disable-next-line no-await-in-loop
+			response = await fetch(url, fetchOptions);
+		} catch (error) {
+			if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+				// A write that timed out may still have reached Gmail, so say so
+				// rather than inviting a blind retry that could send twice.
+				throw new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)}s (${method} ${endpoint.split('?')[0]}).${isRead ? '' : ' It may still have gone through: check Gmail (Sent or Drafts) before retrying.'}`);
+			}
 
-	return parseResponse(response);
+			throw error;
+		}
+
+		if (response.ok) {
+			return parseResponse(response);
+		}
+
+		// eslint-disable-next-line no-await-in-loop
+		const errorText = await response.text();
+		if (!isRateLimited(response.status, errorText)) {
+			throw new Error(`Gmail API error: ${response.status} ${response.statusText} - ${errorText}`);
+		}
+
+		// Never below one base delay (Google asks for at least a second before
+		// the first retry), plus up to 50% random spread so parallel callers
+		// do not all come back in the same instant.
+		const backoff = Math.min(GMAIL_RETRY.maxDelayMs, GMAIL_RETRY.baseDelayMs * (2 ** (attempt - 1)));
+		const asked = retryAfterMs(response);
+		const floor = Math.max(GMAIL_RETRY.baseDelayMs, asked ?? backoff);
+		const elapsed = Date.now() - startedAt;
+		// The spread may not push a wait that fits the budget over it.
+		const delay = Math.min(floor + (Math.random() * floor / 2), Math.max(floor, GMAIL_RETRY.budgetMs - elapsed));
+		if (attempt >= GMAIL_RETRY.maxAttempts || elapsed + delay > GMAIL_RETRY.budgetMs) {
+			// Keep the "Gmail API error: <status>" prefix: callers (draft_send's
+			// schedule restore) treat that prefix as "Gmail answered, so it did not send".
+			throw new Error(`Gmail API error: ${response.status} ${response.statusText} - rate limited by Google after ${attempt} attempt(s) over ${Math.round(elapsed / 1000)}s (${method} ${endpoint.split('?')[0]})${asked !== undefined && asked > GMAIL_RETRY.budgetMs ? `; Google asked to wait ${Math.round(asked / 1000)}s` : ''}. Google rejected it as rate limited, so it should not have ${isRead ? 'run' : 'changed or sent anything'}; retry later. - ${errorText}`);
+		}
+
+		console.error(`gmail-api: rate limited (${response.status}) on ${method} ${endpoint.split('?')[0]}, attempt ${attempt}; waiting ${Math.round(delay)} ms`);
+		// eslint-disable-next-line no-await-in-loop
+		await sleep(delay);
+	}
 }
