@@ -154,7 +154,7 @@ export const SENDING_WINDOW_MS = 130 * 60 * 1000;
 type RawDraft = {id: string; message: {id: string; threadId: string; raw: string}};
 
 export async function getRawDraft(token: string, draftId: string): Promise<RawDraft> {
-	return await makeGmailApiCall('GET', `/users/me/drafts/${encodeURIComponent(draftId)}?format=raw`, token) as RawDraft;
+	return await makeGmailApiCall('GET', `/users/me/drafts/${encodeURIComponent(draftId)}?format=raw`, token, undefined, {urgent: true}) as RawDraft;
 }
 
 /** The marker in a raw message's header block, if any. */

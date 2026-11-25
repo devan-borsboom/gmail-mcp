@@ -1,5 +1,8 @@
 // Gmail API configuration and utilities
 import {GOOGLE_TIMEOUTS} from './timeouts.js';
+import {
+	GMAIL_PACE, GmailBusyError, GmailQueueTimeoutError, acquireGmailSlot,
+} from './pacer.js';
 
 export const GMAIL_API_BASE_URL = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -102,6 +105,16 @@ function retryAfterMs(response: Response): number | undefined {
 	return undefined;
 }
 
+export type GmailCallOptions = {
+	/**
+	 * For a read that comes right before a write (thread headers before a reply,
+	 * the original before a forward, the draft before a send). It gets the same
+	 * priority and wait cap as the write, so a caller that gives up and retries
+	 * cannot leave an abandoned call that still sends when its turn comes.
+	 */
+	urgent?: boolean;
+};
+
 const sleep = async (ms: number) => new Promise<void>((resolve) => {
 	setTimeout(resolve, ms);
 });
@@ -112,6 +125,7 @@ export async function makeGmailApiCall(
 	endpoint: string,
 	accessToken: string,
 	body?: unknown,
+	options: GmailCallOptions = {},
 ) {
 	const url = `${GMAIL_API_BASE_URL}${endpoint}`;
 	const headers = createBaseHeaders(accessToken);
@@ -124,43 +138,73 @@ export async function makeGmailApiCall(
 	const timeoutMs = isRead ? GOOGLE_TIMEOUTS.gmailReadMs : GOOGLE_TIMEOUTS.gmailWriteMs;
 	const serialized = body ? JSON.stringify(body) : undefined;
 
-	const startedAt = Date.now();
+	let startedAt: number | undefined;
 	for (let attempt = 1; ; attempt++) {
-		const fetchOptions: RequestInit = {
-			method,
-			headers,
-			// A fresh timeout per attempt: one shared signal would already be spent.
-			signal: AbortSignal.timeout(timeoutMs),
-		};
-
-		if (serialized !== undefined) {
-			fetchOptions.body = serialized;
-		}
-
-		let response: Response;
+		// Every attempt, retries included, waits for a pacer slot. The slot is held
+		// only while the request and its body are in flight, never during the
+		// backoff sleep below. The budget clock starts once the first slot is won,
+		// so time spent queued behind a burst does not eat the retry budget.
+		// Writes (and urgent reads that prepare one) go ahead of reads and give up
+		// (unsent) rather than wait behind a long burst, so a caller that times
+		// out and retries cannot cause a double send.
+		let release: () => void;
 		try {
 			// eslint-disable-next-line no-await-in-loop
-			response = await fetch(url, fetchOptions);
+			release = await (isRead && !options.urgent ? acquireGmailSlot() : acquireGmailSlot({priority: 'high', maxWaitMs: GMAIL_PACE.writeMaxWaitMs}));
 		} catch (error) {
-			if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-				// A write that timed out may still have reached Gmail, so say so
-				// rather than inviting a blind retry that could send twice.
-				throw new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)}s (${method} ${endpoint.split('?')[0]}).${isRead ? '' : ' It may still have gone through: check Gmail (Sent or Drafts) before retrying.'}`);
+			if (error instanceof GmailQueueTimeoutError) {
+				// The "Gmail API error:" prefix is what restoreAfterFailedSend reads as "did not send": true here.
+				throw new GmailBusyError(`Gmail API error: 429 busy - ${error.message} (${method} ${endpoint.split('?')[0]}). Too many Gmail calls were queued on this inbox. It was not sent; retry in a minute.`);
 			}
 
 			throw error;
 		}
 
-		if (response.ok) {
-			return parseResponse(response);
+		startedAt ??= Date.now();
+		let limited: {response: Response; errorText: string};
+		try {
+			const fetchOptions: RequestInit = {
+				method,
+				headers,
+				// A fresh timeout per attempt, started once the slot is held.
+				signal: AbortSignal.timeout(timeoutMs),
+			};
+
+			if (serialized !== undefined) {
+				fetchOptions.body = serialized;
+			}
+
+			let response: Response;
+			try {
+				// eslint-disable-next-line no-await-in-loop
+				response = await fetch(url, fetchOptions);
+			} catch (error) {
+				if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+					// A write that timed out may still have reached Gmail, so say so
+					// rather than inviting a blind retry that could send twice.
+					throw new Error(`Gmail API request timed out after ${Math.round(timeoutMs / 1000)}s (${method} ${endpoint.split('?')[0]}).${isRead ? '' : ' It may still have gone through: check Gmail (Sent or Drafts) before retrying.'}`);
+				}
+
+				throw error;
+			}
+
+			if (response.ok) {
+				// eslint-disable-next-line no-await-in-loop
+				return await parseResponse(response);
+			}
+
+			// eslint-disable-next-line no-await-in-loop
+			const errorText = await response.text();
+			if (!isRateLimited(response.status, errorText)) {
+				throw new Error(`Gmail API error: ${response.status} ${response.statusText} - ${errorText}`);
+			}
+
+			limited = {response, errorText};
+		} finally {
+			release();
 		}
 
-		// eslint-disable-next-line no-await-in-loop
-		const errorText = await response.text();
-		if (!isRateLimited(response.status, errorText)) {
-			throw new Error(`Gmail API error: ${response.status} ${response.statusText} - ${errorText}`);
-		}
-
+		const {response, errorText} = limited;
 		// Never below one base delay (Google asks for at least a second before
 		// the first retry), plus up to 50% random spread so parallel callers
 		// do not all come back in the same instant.

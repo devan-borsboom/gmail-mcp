@@ -1,4 +1,5 @@
 import {makeGmailApiCall} from './gmail-api.js';
+import {GmailBusyError} from './pacer.js';
 
 /**
  * Recover threading headers from the thread itself.
@@ -45,6 +46,9 @@ export async function fetchThreadHeaders(
 			`/users/me/threads/${encodeURIComponent(threadId)}?format=metadata`
 			+ '&metadataHeaders=Message-Id&metadataHeaders=References',
 			token,
+			undefined,
+			// This read comes right before a send: see GmailCallOptions.urgent.
+			{urgent: true},
 		) as {messages?: ThreadMessage[]};
 
 		// A draft sits in the thread and carries a Message-ID of its own, but no
@@ -79,7 +83,13 @@ export async function fetchThreadHeaders(
 			// so hand it only the inherited part.
 			...(references && {references}),
 		};
-	} catch {
+	} catch (error) {
+		// A busy inbox is not a missing thread: stop, so the send does not go out
+		// without its thread headers (and cannot go out twice on a client retry).
+		if (error instanceof GmailBusyError) {
+			throw error;
+		}
+
 		// Best-effort: a lookup failure must never fail the send. It must not be
 		// silent either — an unreported failure is the original defect, reached
 		// by a different road.

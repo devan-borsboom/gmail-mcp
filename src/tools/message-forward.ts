@@ -370,7 +370,7 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 		},
 		async ({id, to, body: userMessage, from, attachments: userAttachments}) => {
 			// Fetch the original message
-			const original = await makeGmailApiCall('GET', `/users/me/messages/${id}?format=full`, config.token);
+			const original = await makeGmailApiCall('GET', `/users/me/messages/${id}?format=full`, config.token, undefined, {urgent: true});
 			const parsed = messageSchema.parse(original);
 
 			// Extract headers from original
@@ -397,6 +397,8 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 						'GET',
 						`/users/me/messages/${id}/attachments/${att.attachmentId}`,
 						config.token,
+						undefined,
+						{urgent: true},
 					);
 					const data = z.object({data: z.string()}).parse(resp);
 
@@ -411,6 +413,8 @@ export function registerMessageForward(server: McpServer, config: Config): void 
 						'GET',
 						`/users/me/messages/${id}/attachments/${img.attachmentId}`,
 						config.token,
+						undefined,
+						{urgent: true},
 					);
 					const data = z.object({data: z.string()}).parse(resp);
 

@@ -2,6 +2,7 @@ import {
 	describe, it, expect, beforeEach, afterEach, vi,
 } from 'vitest';
 import {makeGmailApiCall, GMAIL_RETRY} from './gmail-api.js';
+import {GMAIL_PACE, resetGmailPacer} from './pacer.js';
 
 /**
  * From Feb 1, 2027 Google holds AI agents calling the Gmail REST API to its
@@ -11,12 +12,18 @@ import {makeGmailApiCall, GMAIL_RETRY} from './gmail-api.js';
  */
 
 const saved = {...GMAIL_RETRY};
+const savedPace = {...GMAIL_PACE};
 
 const ok = (body: unknown) => new Response(JSON.stringify(body), {status: 200, headers: {'content-type': 'application/json'}});
 const tooMany = (headers: Record<string, string> = {}) => new Response('{"error":{"code":429,"message":"Too many requests"}}', {status: 429, headers});
 const forbidden = (reason: string) => new Response(JSON.stringify({error: {code: 403, errors: [{reason}]}}), {status: 403, statusText: 'Forbidden'});
 
 beforeEach(() => {
+	// These tests time retries in milliseconds: keep the pacer out of their way.
+	GMAIL_PACE.perSecond = 100_000;
+	GMAIL_PACE.burst = 100_000;
+	GMAIL_PACE.maxConcurrent = 1000;
+	resetGmailPacer();
 	GMAIL_RETRY.maxAttempts = 5;
 	GMAIL_RETRY.baseDelayMs = 4;
 	GMAIL_RETRY.maxDelayMs = 40;
@@ -26,6 +33,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	Object.assign(GMAIL_RETRY, saved);
+	Object.assign(GMAIL_PACE, savedPace);
+	resetGmailPacer();
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
